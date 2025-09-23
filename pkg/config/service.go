@@ -24,6 +24,10 @@ import (
 	"github.com/livekit/egress/pkg/errors"
 	"github.com/livekit/protocol/logger"
 	"github.com/livekit/protocol/utils"
+
+	// BEGIN OPENVIDU BLOCK
+	"github.com/livekit/egress/pkg/openvidu/openviduconfig"
+	// END OPENVIDU BLOCK
 )
 
 const (
@@ -61,11 +65,7 @@ type ServiceConfig struct {
 	*CPUCostConfig `yaml:"cpu_cost"` // CPU costs for the different egress types
 
 	// BEGIN OPENVIDU BLOCK
-	// controls how StartEgressAffinity is computed by the egress server
-	// supported values:
-	//  - "binpack": default behavior (0 if no capacity, 0.5 if idle, 1 if busy)
-	//  - "cpuload": prefer nodes with more available CPU (normalized 0..1)
-	NodeSelector string `yaml:"node_selector"`
+	OpenVidu openviduconfig.OpenViduConfig `yaml:"openvidu"`
 	// END OPENVIDU BLOCK
 }
 
@@ -118,8 +118,8 @@ func (c *ServiceConfig) InitDefaults() {
 	}
 
 	// BEGIN OPENVIDU BLOCK
-	if c.NodeSelector == "" {
-		c.NodeSelector = "binpack"
+	if c.OpenVidu.NodeSelector.Kind == "" {
+		c.OpenVidu.NodeSelector.Kind = "binpack"
 	}
 	// END OPENVIDU BLOCK
 
