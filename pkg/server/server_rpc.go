@@ -208,6 +208,9 @@ func (s *Server) StartEgressAffinity(_ context.Context, req *rpc.StartEgressRequ
 		if score < 0 {
 			score = 0
 		}
+
+		logger.Infow("cpuload score when evaluating affinity", "score", score, "available", available, "total", total)
+
 		return score
 
 	default:
