@@ -118,8 +118,8 @@ func (c *ServiceConfig) InitDefaults() {
 	}
 
 	// BEGIN OPENVIDU BLOCK
-	if c.OpenVidu.NodeSelector.Kind == "" {
-		c.OpenVidu.NodeSelector.Kind = "binpack"
+	if c.OpenVidu.AllocationStrategy == "" {
+		c.OpenVidu.AllocationStrategy = "binpack"
 	}
 	// END OPENVIDU BLOCK
 
