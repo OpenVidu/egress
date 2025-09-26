@@ -129,7 +129,7 @@ func (c *ServiceConfig) InitDefaults() {
 
 	// BEGIN OPENVIDU BLOCK
 	if c.OpenVidu.AllocationStrategy == "" {
-		c.OpenVidu.AllocationStrategy = "binpack"
+		c.OpenVidu.AllocationStrategy = "cpuload"
 	}
 	// END OPENVIDU BLOCK
 
