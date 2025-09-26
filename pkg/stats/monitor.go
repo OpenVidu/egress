@@ -49,6 +49,11 @@ type Service interface {
 }
 
 type Monitor struct {
+
+	// BEGIN OPENVIDU BLOCK
+	disableCpuOverloadKiller bool
+	// END OPENVIDU BLOCK
+
 	nodeID        string
 	clusterID     string
 	cpuCostConfig *config.CPUCostConfig
@@ -85,6 +90,11 @@ type processStats struct {
 
 func NewMonitor(conf *config.ServiceConfig, svc Service) (*Monitor, error) {
 	m := &Monitor{
+
+		// BEGIN OPENVIDU BLOCK
+		disableCpuOverloadKiller: conf.OpenVidu.DisableCpuOverloadKiller,
+		// END OPENVIDU BLOCK
+
 		nodeID:        conf.NodeID,
 		clusterID:     conf.ClusterID,
 		cpuCostConfig: conf.CPUCostConfig,
@@ -479,7 +489,14 @@ func (m *Monitor) updateEgressStats(stats *hwstats.ProcStats) {
 		if m.requests.Load() > 1 {
 			m.highCPUDuration++
 			if m.highCPUDuration >= minKillDuration {
-				m.svc.KillProcess(maxCPUEgress, errors.ErrCPUExhausted(maxCPU))
+				// BEGIN OPENVIDU BLOCK
+				if m.disableCpuOverloadKiller {
+					logger.Warnw("cpu overload killer is disabled, not killing egress", nil)
+				} else {
+					logger.Warnw("killing egress due to sustained high cpu", nil, "cpu", load)
+					m.svc.KillProcess(maxCPUEgress, errors.ErrCPUExhausted(maxCPU))
+				}
+				// END OPENVIDU BLOCK
 				m.highCPUDuration = 0
 			}
 		}
