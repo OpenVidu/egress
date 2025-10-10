@@ -53,9 +53,14 @@ func NewHandlerLogger(handlerID, egressID string) *medialogutils.CmdLogger {
 				strings.HasPrefix(line, "0:00:"),
 				strings.HasSuffix(line, "is not mapped"),
 				strings.HasSuffix(line, "load cuda library"),
-				strings.Contains(line, "libcuda.so.1"):
+				strings.Contains(line, "libcuda.so.1"),
+				// BEGIN OPENVIDU BLOCK
+				// Do not log redis sentinel messages of new master. They are currently
+				// shown by the main process and are confusing for users.
+				strings.Contains(line, "sentinel: new master"),
+				strings.Contains(line, "sentinel: selected addr"):
+				// END OPENVIDU BLOCK
 				continue
-
 			default:
 				l.Errorw(line, nil)
 			}
