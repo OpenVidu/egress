@@ -192,7 +192,7 @@ func (s *Server) StartEgressAffinity(_ context.Context, req *rpc.StartEgressRequ
 	}
 
 	// BEGIN OPENVIDU BLOCK
-	switch s.conf.NodeSelector {
+	switch s.conf.OpenVidu.AllocationStrategy {
 	case "cpuload":
 		// Prefer nodes with more available CPU. Normalize available/total -> [0,1].
 		available := s.monitor.GetAvailableCPU()
@@ -208,6 +208,9 @@ func (s *Server) StartEgressAffinity(_ context.Context, req *rpc.StartEgressRequ
 		if score < 0 {
 			score = 0
 		}
+
+		logger.Infow("cpuload score when evaluating affinity", "score", score, "available", available, "total", total)
+
 		return score
 
 	default:
