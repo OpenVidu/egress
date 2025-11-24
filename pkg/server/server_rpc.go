@@ -191,14 +191,39 @@ func (s *Server) StartEgressAffinity(_ context.Context, req *rpc.StartEgressRequ
 		return -1
 	}
 
-	if s.activeRequests.Load() == 0 {
-		// group multiple track and track composite requests.
-		// if this instance is idle and another is already handling some, the request will go to that server.
-		// this avoids having many instances with one track request each, taking availability from room composite.
-		return 0.5
+	// BEGIN OPENVIDU BLOCK
+	switch s.conf.OpenVidu.AllocationStrategy {
+	case "cpuload":
+		// Prefer nodes with more available CPU. Normalize available/total -> [0,1].
+		available := s.monitor.GetAvailableCPU()
+		total := s.monitor.GetCPUTotal()
+		if total <= 0 {
+			total = 1
+		}
+		// Normalize to [0,1]
+		score := float32(available / total)
+		if score > 1 {
+			score = 1
+		}
+		if score < 0 {
+			score = 0
+		}
+
+		logger.Infow("cpuload score when evaluating affinity", "score", score, "available", available, "total", total)
+
+		return score
+
+	default:
+		if s.activeRequests.Load() == 0 {
+			// group multiple track and track composite requests.
+			// if this instance is idle and another is already handling some, the request will go to that server.
+			// this avoids having many instances with one track request each, taking availability from room composite.
+			return 0.5
+		}
+		// already handling a request and has available cpu
+		return 1
 	}
-	// already handling a request and has available cpu
-	return 1
+	// END OPENVIDU BLOCK
 }
 
 func (s *Server) ListActiveEgress(ctx context.Context, _ *rpc.ListActiveEgressRequest) (*rpc.ListActiveEgressResponse, error) {

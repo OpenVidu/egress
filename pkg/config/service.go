@@ -26,6 +26,10 @@ import (
 	"github.com/livekit/protocol/logger"
 	"github.com/livekit/protocol/rpc"
 	"github.com/livekit/protocol/utils"
+
+	// BEGIN OPENVIDU BLOCK
+	"github.com/livekit/egress/pkg/openvidu/openviduconfig"
+	// END OPENVIDU BLOCK
 )
 
 const (
@@ -67,6 +71,10 @@ type ServiceConfig struct {
 	DebugHandlerPort int `yaml:"debug_handler_port"` // egress debug handler port
 
 	*CPUCostConfig `yaml:"cpu_cost"` // CPU costs for the different egress types
+
+	// BEGIN OPENVIDU BLOCK
+	OpenVidu openviduconfig.OpenViduConfig `yaml:"openvidu"`
+	// END OPENVIDU BLOCK
 }
 
 type CPUCostConfig struct {
@@ -118,6 +126,12 @@ func (c *ServiceConfig) InitDefaults() {
 	if c.CPUCostConfig == nil {
 		c.CPUCostConfig = new(CPUCostConfig)
 	}
+
+	// BEGIN OPENVIDU BLOCK
+	if c.OpenVidu.AllocationStrategy == "" {
+		c.OpenVidu.AllocationStrategy = "cpuload"
+	}
+	// END OPENVIDU BLOCK
 
 	if c.TemplatePort == 0 {
 		c.TemplatePort = defaultTemplatePort
