@@ -219,10 +219,9 @@ func (s *Server) StartEgressAffinity(_ context.Context, req *rpc.StartEgressRequ
 			// if this instance is idle and another is already handling some, the request will go to that server.
 			// this avoids having many instances with one track request each, taking availability from room composite.
 			return 0.5
-		} else {
-			// already handling a request and has available cpu
-			return 1
 		}
+		// already handling a request and has available cpu
+		return 1
 	}
 	// END OPENVIDU BLOCK
 }

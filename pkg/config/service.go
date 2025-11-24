@@ -19,10 +19,12 @@ import (
 	"os"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"gopkg.in/yaml.v3"
 
 	"github.com/livekit/egress/pkg/errors"
 	"github.com/livekit/protocol/logger"
+	"github.com/livekit/protocol/rpc"
 	"github.com/livekit/protocol/utils"
 
 	// BEGIN OPENVIDU BLOCK
@@ -46,11 +48,14 @@ const (
 
 	defaultIOCreateTimeout = time.Second * 15
 	defaultIOUpdateTimeout = time.Second * 30
+	defaultIOWorkers       = 5
 
-	defaultJitterBufferLatency = time.Second * 2
-	defaultAudioMixerLatency   = time.Millisecond * 2750
-	defaultPipelineLatency     = time.Second * 3
-	defaultRTPMaxAllowedTsDiff = time.Second
+	defaultJitterBufferLatency   = time.Second * 2
+	defaultAudioMixerLatency     = time.Millisecond * 2750
+	defaultPipelineLatency       = time.Second * 3
+	defaultRTPMaxDriftAdjustment = time.Millisecond * 5
+	defaultOldPacketThreshold    = 500 * time.Millisecond
+	defaultRTPMaxAllowedTsDiff   = time.Second * 5
 
 	defaultAudioTempoControllerAdjustmentRate = 0.05
 
@@ -108,6 +113,8 @@ func NewServiceConfig(confString string) (*ServiceConfig, error) {
 	conf.NodeID = utils.NewGuid("NE_")
 	conf.InitDefaults()
 
+	rpc.InitPSRPCStats(prometheus.Labels{"node_id": conf.NodeID, "node_type": "EGRESS"})
+
 	if err := conf.initLogger("nodeID", conf.NodeID, "clusterID", conf.ClusterID); err != nil {
 		return nil, err
 	}
@@ -138,6 +145,9 @@ func (c *ServiceConfig) InitDefaults() {
 	}
 	if c.IOUpdateTimeout == 0 {
 		c.IOUpdateTimeout = defaultIOUpdateTimeout
+	}
+	if c.IOWorkers <= 0 {
+		c.IOWorkers = defaultIOWorkers
 	}
 
 	// Setting CPU costs from config. Ensure that CPU costs are positive
@@ -173,21 +183,36 @@ func (c *ServiceConfig) InitDefaults() {
 		c.MaxUploadQueue = maxUploadQueue
 	}
 
-	if c.Latency.JitterBufferLatency == 0 {
-		c.Latency.JitterBufferLatency = defaultJitterBufferLatency
-	}
-	if c.Latency.AudioMixerLatency == 0 {
-		c.Latency.AudioMixerLatency = defaultAudioMixerLatency
-	}
-	if c.Latency.PipelineLatency == 0 {
-		c.Latency.PipelineLatency = defaultPipelineLatency
-	}
-	if c.Latency.RTPMaxAllowedTsDiff == 0 {
-		c.Latency.RTPMaxAllowedTsDiff = defaultRTPMaxAllowedTsDiff
-	}
+	applyLatencyDefaults(&c.Latency)
+
 	if c.AudioTempoController.Enabled {
 		if c.AudioTempoController.AdjustmentRate > 0.2 || c.AudioTempoController.AdjustmentRate <= 0 {
 			c.AudioTempoController.AdjustmentRate = defaultAudioTempoControllerAdjustmentRate
 		}
+	}
+}
+
+func applyLatencyDefaults(latency *LatencyConfig) {
+	if latency.JitterBufferLatency == 0 {
+		latency.JitterBufferLatency = defaultJitterBufferLatency
+	}
+	if latency.AudioMixerLatency == 0 {
+		latency.AudioMixerLatency = defaultAudioMixerLatency
+	}
+	if latency.PipelineLatency == 0 {
+		latency.PipelineLatency = defaultPipelineLatency
+	}
+	if latency.RTPMaxAllowedTsDiff == 0 {
+		latency.RTPMaxAllowedTsDiff = defaultRTPMaxAllowedTsDiff
+	}
+	if latency.RTPMaxAllowedTsDiff < latency.JitterBufferLatency {
+		// RTP max allowed ts diff must be equal or greater than jitter buffer latency to absorb the jitter buffer burst
+		latency.RTPMaxAllowedTsDiff = latency.JitterBufferLatency
+	}
+	if latency.RTPMaxDriftAdjustment == 0 {
+		latency.RTPMaxDriftAdjustment = defaultRTPMaxDriftAdjustment
+	}
+	if latency.OldPacketThreshold == 0 {
+		latency.OldPacketThreshold = defaultOldPacketThreshold
 	}
 }
