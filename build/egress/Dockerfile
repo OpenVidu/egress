@@ -57,6 +57,13 @@ RUN chmod +x /tini
 
 FROM livekit/gstreamer:1.24.12-prod
 
+# BEGIN OPENVIDU BLOCK
+# Install timezone data support
+RUN DEBIAN_FRONTEND=noninteractive apt-get update && \
+    apt-get install -y tzdata && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+# END OPENVIDU BLOCK
+
 ARG TARGETPLATFORM
 
 # install deps
