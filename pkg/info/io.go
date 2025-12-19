@@ -35,9 +35,13 @@ import (
 )
 
 const (
-	numWorkers                     = 5
-	maxBackoff                     = time.Minute * 1
-	unhealthyShutdownWatchdogDelay = 20 * time.Second // TODO change to 10 min once we undrerstant PSRPC failures
+	numWorkers = 5
+	maxBackoff = time.Minute * 1
+	// BEGIN OPENVIDU BLOCK
+	// Timeout changed from 20 seconds to 10 minutes to avoid premature shutdowns
+	// In possible bad network conditions
+	unhealthyShutdownWatchdogDelay = 10 * time.Minute // TODO change to 10 min once we undrerstant PSRPC failures
+	// END OPENVIDU BLOCK
 )
 
 type IOClient interface {
