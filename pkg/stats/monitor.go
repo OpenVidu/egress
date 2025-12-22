@@ -39,6 +39,7 @@ const (
 	minKillDuration      = 10
 	gb                   = 1024.0 * 1024.0 * 1024.0
 	pulseClientHold      = 4
+	memoryBuffer         = 1
 )
 
 type Service interface {
@@ -103,6 +104,8 @@ func NewMonitor(conf *config.ServiceConfig, svc Service) (*Monitor, error) {
 		procStats:     make(map[int]*processStats),
 	}
 
+	m.initPrometheus()
+
 	procStats, err := hwstats.NewProcMonitor(m.updateEgressStats)
 	if err != nil {
 		return nil, err
@@ -112,8 +115,6 @@ func NewMonitor(conf *config.ServiceConfig, svc Service) (*Monitor, error) {
 	if err = m.validateCPUConfig(); err != nil {
 		return nil, err
 	}
-
-	m.initPrometheus()
 
 	return m, nil
 }
@@ -187,7 +188,7 @@ func (m *Monitor) canAcceptRequestLocked(req *rpc.StartEgressRequest) ([]interfa
 
 	memoryUsage := m.memoryUsage + m.pendingMemoryUsage.Load()
 
-	if m.cpuCostConfig.MaxMemory > 0 && memoryUsage+m.cpuCostConfig.MemoryCost >= m.cpuCostConfig.MaxMemory {
+	if m.cpuCostConfig.MaxMemory > 0 && memoryUsage+m.cpuCostConfig.MemoryCost+memoryBuffer >= m.cpuCostConfig.MaxMemory {
 		fields = append(fields, "canAccept", false, "reason", "memory")
 		return fields, false
 	}

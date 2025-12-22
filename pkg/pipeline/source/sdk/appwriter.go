@@ -46,6 +46,7 @@ const (
 	discontinuityTolerance = 500 * time.Millisecond
 	pipelineCheckInterval  = 5 * time.Second
 	cSamplesQueueDepth     = 100
+	drainingTimeout        = time.Second * 3
 )
 
 type sampleItem struct {
@@ -92,15 +93,20 @@ type AppWriter struct {
 	initialized          bool
 
 	// state
-	buildReady   core.Fuse
-	active       atomic.Bool
-	lastReceived atomic.Time
-	lastPushed   atomic.Time
-	playing      core.Fuse
-	draining     core.Fuse
-	endStream    core.Fuse
-	finished     core.Fuse
-	stats        appWriterStats
+	buildReady               core.Fuse
+	active                   atomic.Bool
+	lastReceived             atomic.Time
+	lastPushed               atomic.Time
+	playing                  core.Fuse
+	draining                 core.Fuse
+	endStreamSignaled        core.Fuse
+	endStreamSourceProcessed core.Fuse
+	endStreamProcessed       core.Fuse
+	finished                 core.Fuse
+	stats                    appWriterStats
+
+	// diagnostics, set on unexpected flushing when pushing packets to the pipeline
+	flushDotRequested atomic.Bool
 
 	tpLock       deadlock.RWMutex
 	timeProvider gstreamer.TimeProvider
@@ -217,8 +223,23 @@ func (w *AppWriter) start() {
 	}()
 
 	go w.pushSamples()
-	for !w.endStream.IsBroken() {
+	for !w.endStreamSignaled.IsBroken() {
 		w.readNext()
+	}
+	w.drainJitterBuffer()
+
+	select {
+	case <-w.endStreamProcessed.Watch():
+		w.logger.Debugw("endStreamProcessed fuse broken")
+	case <-time.After(drainingTimeout):
+		w.logger.Errorw("endStreamProcessed not broken after 3 seconds, bug in the draining logic!", nil,
+			"endStreamSourceProcessed", w.endStreamSourceProcessed.IsBroken(),
+			"playing", w.playing.IsBroken(),
+			"active", w.active.Load(),
+			"lastReceived", w.lastReceived.Load(),
+			"lastPushed", w.lastPushed.Load(),
+			"lastPTS", w.lastPTS,
+		)
 	}
 
 	// clean up
@@ -293,11 +314,8 @@ func (w *AppWriter) handleReadError(err error) {
 	var netErr net.Error
 	switch {
 	case w.draining.IsBroken():
-		w.endStream.Break()
-
-		w.samplesLock.Lock()
-		w.samplesCond.Broadcast()
-		w.samplesLock.Unlock()
+		w.endStreamSignaled.Break()
+		w.notifyPushSamples()
 
 	case errors.As(err, &netErr) && netErr.Timeout():
 		if !w.active.Load() {
@@ -324,11 +342,8 @@ func (w *AppWriter) handleReadError(err error) {
 			w.logger.Errorw("could not read packet", err)
 		}
 		w.draining.Break()
-		w.endStream.Break()
-
-		w.samplesLock.Lock()
-		w.samplesCond.Broadcast()
-		w.samplesLock.Unlock()
+		w.endStreamSignaled.Break()
+		w.notifyPushSamples()
 	}
 }
 
@@ -339,6 +354,18 @@ func (w *AppWriter) SetTimeProvider(tp gstreamer.TimeProvider) {
 	}
 	w.timeProvider = tp
 	w.tpLock.Unlock()
+}
+
+func (w *AppWriter) waitFor(ch <-chan struct{}) bool {
+	if ch == nil {
+		return true
+	}
+	select {
+	case <-ch:
+		return true
+	case <-w.draining.Watch():
+		return false
+	}
 }
 
 func (w *AppWriter) pipelineRunningTime() (time.Duration, bool) {
@@ -373,6 +400,12 @@ func (w *AppWriter) onKeyframeRequired() {
 	w.sendPLI()
 }
 
+func (w *AppWriter) notifyPushSamples() {
+	w.samplesLock.Lock()
+	w.samplesCond.Broadcast()
+	w.samplesLock.Unlock()
+}
+
 func (w *AppWriter) onPacket(sample []jitter.ExtPacket) {
 	w.samplesLock.Lock()
 	item := &sampleItem{sample, nil}
@@ -404,19 +437,25 @@ func (w *AppWriter) onPacket(sample []jitter.ExtPacket) {
 }
 
 func (w *AppWriter) pushSamples() {
-	select {
-	case <-w.playing.Watch():
-		// continue
-	case <-w.draining.Watch():
+	defer func() {
+		w.endStreamSignaled.Break()
+		w.endStreamProcessed.Break()
+		w.logger.Debugw("pushSamples finished")
+	}()
+	if !w.waitFor(w.callbacks.PipelinePaused()) {
+		return
+	}
+
+	if !w.waitFor(w.playing.Watch()) {
 		return
 	}
 
 	for {
 		w.samplesLock.Lock()
-		for w.samplesHead == nil && !w.endStream.IsBroken() {
+		for w.samplesHead == nil && !w.endStreamSourceProcessed.IsBroken() {
 			w.samplesCond.Wait()
 		}
-		if w.endStream.IsBroken() {
+		if w.endStreamSourceProcessed.IsBroken() && w.samplesHead == nil {
 			w.samplesLock.Unlock()
 			return
 		}
@@ -433,13 +472,8 @@ func (w *AppWriter) pushSamples() {
 			if err := w.pushPacket(pkt); err != nil {
 				if !utils.ErrorIsOneOf(err, synchronizer.ErrPacketOutOfOrder, synchronizer.ErrPacketTooOld) {
 					w.draining.Break()
-					w.endStream.Break()
-
-					// wake any waiter
-					w.samplesLock.Lock()
-					w.samplesCond.Broadcast()
-					w.samplesLock.Unlock()
-					break
+					w.notifyPushSamples()
+					return
 				}
 			}
 		}
@@ -491,6 +525,9 @@ func (w *AppWriter) pushPacket(pkt jitter.ExtPacket) error {
 	if flow := w.src.PushBuffer(b); flow != gst.FlowOK {
 		w.stats.packetsDropped.Inc()
 		w.logger.Infow("unexpected flow return", "flow", flow)
+		if flow == gst.FlowFlushing && w.flushDotRequested.CompareAndSwap(false, true) {
+			w.callbacks.OnDebugDotRequest("appsrc_flush_" + w.track.ID())
+		}
 	}
 
 	w.lastPushed.Store(time.Now())
@@ -513,7 +550,7 @@ func (w *AppWriter) maybeCheckPipelineLag(pts time.Duration) {
 	}
 
 	if pts < pipelineTime-w.conf.Latency.AudioMixerLatency {
-		w.logger.Errorw(
+		w.logger.Warnw(
 			"packet PTS too far in the past compared to the pipeline, mixer will drop the buffer!",
 			nil,
 			"pts", pts,
@@ -532,11 +569,8 @@ func (w *AppWriter) Drain(force bool) {
 		w.logger.Debugw("draining")
 
 		endStream := func() {
-			w.endStream.Break()
-
-			w.samplesLock.Lock()
-			w.samplesCond.Broadcast()
-			w.samplesLock.Unlock()
+			w.endStreamSignaled.Break()
+			w.notifyPushSamples()
 		}
 
 		if force || !w.active.Load() {
@@ -546,13 +580,13 @@ func (w *AppWriter) Drain(force bool) {
 		}
 	})
 
-	// wait until finished
 	<-w.finished.Watch()
+	w.logger.Debugw("finished fuse broken")
 	w.synchronizer.RemoveTrack(w.track.ID())
 }
 
 func (w *AppWriter) logStats() {
-	ended := w.endStream.Watch()
+	ended := w.endStreamSignaled.Watch()
 	ticker := time.NewTicker(time.Second * 10)
 	defer ticker.Stop()
 
@@ -603,6 +637,20 @@ func (w *AppWriter) updateDrift(drift time.Duration) {
 
 func (w *AppWriter) shouldHandleDiscontinuity() bool {
 	return w.track.Kind() == webrtc.RTPCodecTypeAudio && w.conf.AudioTempoController.Enabled
+}
+
+func (w *AppWriter) TrackKind() webrtc.RTPCodecType {
+	return w.track.Kind()
+}
+
+func (w *AppWriter) drainJitterBuffer() {
+	w.logger.Debugw("draining jitter buffer")
+	w.buffer.Close()
+	w.buffer.Flush()
+	w.logger.Debugw("jitter buffer flushed")
+
+	w.endStreamSourceProcessed.Break()
+	w.notifyPushSamples()
 }
 
 func isDiscontinuity(lastPTS time.Duration, pts time.Duration) bool {
