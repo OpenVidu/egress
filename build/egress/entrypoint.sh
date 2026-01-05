@@ -15,6 +15,14 @@
 
 set -euxo pipefail
 
+# BEGIN OPENVIDU BLOCK
+# Backup EG_* folders before cleaning tmp
+mkdir -p /home/egress/backup_storage || true
+if [ -d /home/egress/tmp ]; then
+    find /home/egress/tmp -maxdepth 1 -type d -name 'EG_*' -exec cp -r {} /home/egress/backup_storage/ \; 2>/dev/null || true
+fi
+# END OPENVIDU BLOCK
+
 # Clean out tmp
 rm -rf /home/egress/tmp/*
 
