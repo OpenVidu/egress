@@ -495,11 +495,13 @@ func (m *Monitor) GetCPUTotal() float64 {
 
 func (m *Monitor) getCPUUsageLocked() (total, available, pending, used float64) {
 	total = m.cpuStats.NumCPU()
-	if m.requests.Load() == 0 {
-		// if no requests, use total
-		available = total
-		return
-	}
+	// BEGIN OPENVIDU BLOCK
+	// if m.requests.Load() == 0 {
+	// 	// if no requests, use total
+	// 	available = total
+	// 	return
+	// }
+	// END OPENVIDU BLOCK
 
 	for _, ps := range m.pending {
 		if ps.pendingCPU > ps.lastCPU {
@@ -518,6 +520,16 @@ func (m *Monitor) getCPUUsageLocked() (total, available, pending, used float64) 
 
 	// if already running requests, cap usage at MaxCpuUtilization
 	available = total*m.cpuCostConfig.MaxCpuUtilization - pending - used
+
+	// BEGIN OPENVIDU BLOCK
+	// Clamp to sane range
+	if available < 0 {
+		available = 0
+	} else if available > total {
+		available = total
+	}
+	// END OPENVIDU BLOCK
+
 	return
 }
 
