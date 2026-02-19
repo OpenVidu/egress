@@ -16,10 +16,12 @@ package stats
 
 import (
 	"fmt"
+	"runtime"
 	"sort"
 	"time"
 
 	"github.com/linkdata/deadlock"
+	"github.com/mackerelio/go-osstat/cpu"
 	"github.com/pbnjay/memory"
 	"github.com/prometheus/client_golang/prometheus"
 	"go.uber.org/atomic"
@@ -54,6 +56,8 @@ type Monitor struct {
 
 	// BEGIN OPENVIDU BLOCK
 	disableCpuOverloadKiller bool
+	useGlobalCpuMonitoring   bool
+	hostCpuIdle              atomic.Float64
 	// END OPENVIDU BLOCK
 
 	nodeID        string
@@ -105,6 +109,7 @@ func NewMonitor(conf *config.ServiceConfig, svc Service) (*Monitor, error) {
 
 		// BEGIN OPENVIDU BLOCK
 		disableCpuOverloadKiller: conf.OpenVidu.DisableCpuOverloadKiller,
+		useGlobalCpuMonitoring:   conf.OpenVidu.UseGlobalCpuMonitoring,
 		// END OPENVIDU BLOCK
 
 		nodeID:        conf.NodeID,
@@ -133,6 +138,13 @@ func NewMonitor(conf *config.ServiceConfig, svc Service) (*Monitor, error) {
 	} else {
 		m.cgroupMemStats = memStats
 	}
+
+	// BEGIN OPENVIDU BLOCK
+	if m.useGlobalCpuMonitoring {
+		logger.Infow("global CPU monitoring enabled, reading from /proc/stat")
+		go m.monitorHostCpu()
+	}
+	// END OPENVIDU BLOCK
 
 	return m, nil
 }
@@ -518,10 +530,16 @@ func (m *Monitor) getCPUUsageLocked() (total, available, pending, used float64) 
 		}
 	}
 
-	// if already running requests, cap usage at MaxCpuUtilization
-	available = total*m.cpuCostConfig.MaxCpuUtilization - pending - used
-
 	// BEGIN OPENVIDU BLOCK
+	if m.useGlobalCpuMonitoring {
+		// Use true host-level CPU idle from /proc/stat
+		available = m.hostCpuIdle.Load()*m.cpuCostConfig.MaxCpuUtilization - pending
+	} else {
+		// Original behavior: track only egress subprocess CPU usage.
+		// This assumes egress is the only CPU-intensive workload in the container.
+		available = total*m.cpuCostConfig.MaxCpuUtilization - pending - used
+	}
+
 	// Clamp to sane range
 	if available < 0 {
 		available = 0
@@ -713,3 +731,28 @@ func (m *Monitor) checkMemoryKill(maxMemoryEgress string) {
 		m.highMemoryStart = time.Time{}
 	}
 }
+
+// BEGIN OPENVIDU BLOCK
+func (m *Monitor) monitorHostCpu() {
+	numCPU := float64(runtime.NumCPU())
+	prev, _ := cpu.Get()
+	m.hostCpuIdle.Store(numCPU)
+
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		next, err := cpu.Get()
+		if err != nil {
+			logger.Errorw("failed retrieving host CPU idle", err)
+			continue
+		}
+		if d := next.Total - prev.Total; d > 0 {
+			idle := numCPU * float64(next.Idle-prev.Idle) / float64(d)
+			m.hostCpuIdle.Store(idle)
+		}
+		prev = next
+	}
+}
+
+// END OPENVIDU BLOCK

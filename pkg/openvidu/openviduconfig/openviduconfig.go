@@ -11,6 +11,12 @@ type OpenViduConfig struct {
 	// By default if a high CPU usage is detected for a sustained period of time
 	// the most CPU consuming egress will be killed.
 	DisableCpuOverloadKiller bool `yaml:"disable_cpu_overload_killer,omitempty"`
+	// UseGlobalCpuMonitoring enables system-wide CPU monitoring instead of
+	// tracking only egress subprocess CPU usage. When enabled, the monitor
+	// uses the actual idle CPU of the host to determine if new egress requests
+	// can be accepted. This is useful when other CPU-intensive processes run
+	// on the same host alongside egress.
+	UseGlobalCpuMonitoring bool `yaml:"use_global_cpu_monitoring,omitempty"`
 }
 
 // END OPENVIDU BLOCK
