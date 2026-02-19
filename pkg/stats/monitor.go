@@ -563,6 +563,8 @@ func (m *Monitor) updateEgressStats(stats *hwstats.ProcStats) {
 }
 
 // BEGIN OPENVIDU BLOCK
+// TODO: if at some point any other Golang service requires host-level CPU monitoring, then it will
+// probably be worth forking livekit/protocol hwstats package to support it and share the code.
 func (m *Monitor) monitorHostCpu() {
 	numCPU := float64(runtime.NumCPU())
 	prev, _ := cpu.Get()
