@@ -197,6 +197,14 @@ func (m *Monitor) CanAcceptRequest(req *rpc.StartEgressRequest) bool {
 	fields, canAccept := m.canAcceptRequestLocked(req)
 	m.mu.Unlock()
 
+	// BEGIN OPENVIDU BLOCK
+	if !canAccept {
+		// Log warning with the fields
+		err := reasonToError(fields)
+		logger.Warnw("can not accept request", err, fields...)
+	}
+	// END OPENVIDU BLOCK
+
 	logger.Debugw("cpu check", fields...)
 	return canAccept
 }
