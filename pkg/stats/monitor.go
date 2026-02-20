@@ -15,9 +15,11 @@
 package stats
 
 import (
+	"cmp"
 	"fmt"
 	"runtime"
 	"sort"
+	"syscall"
 	"time"
 
 	"github.com/linkdata/deadlock"
@@ -56,6 +58,7 @@ type Monitor struct {
 	disableCpuOverloadKiller bool
 	useGlobalCpuMonitoring   bool
 	hostCpuIdle              atomic.Float64
+	minDiskSpaceMB           float64
 	// END OPENVIDU BLOCK
 
 	nodeID        string
@@ -98,6 +101,7 @@ func NewMonitor(conf *config.ServiceConfig, svc Service) (*Monitor, error) {
 		// BEGIN OPENVIDU BLOCK
 		disableCpuOverloadKiller: conf.OpenVidu.DisableCpuOverloadKiller,
 		useGlobalCpuMonitoring:   conf.OpenVidu.UseGlobalCpuMonitoring,
+		minDiskSpaceMB:           cmp.Or(conf.OpenVidu.MinDiskSpaceMB, 512.0),
 		// END OPENVIDU BLOCK
 
 		nodeID:        conf.NodeID,
@@ -204,6 +208,19 @@ func (m *Monitor) canAcceptRequestLocked(req *rpc.StartEgressRequest) ([]interfa
 		return fields, false
 	}
 
+	// BEGIN OPENVIDU BLOCK
+	// Check disk space before accepting request
+	if diskOK, availableDiskMB := m.checkDiskSpace(); !diskOK {
+		fields = append(fields,
+			"availableDiskMB", availableDiskMB,
+			"minDiskSpaceMB", m.minDiskSpaceMB,
+			"canAccept", false,
+			"reason", "disk",
+		)
+		return fields, false
+	}
+	// END OPENVIDU BLOCK
+
 	required := req.EstimatedCpu
 	switch r := req.Request.(type) {
 	case *rpc.StartEgressRequest_RoomComposite:
@@ -271,10 +288,15 @@ func (m *Monitor) AcceptRequest(req *rpc.StartEgressRequest) error {
 	if m.pending[req.EgressId] != nil {
 		return errors.ErrEgressAlreadyExists
 	}
-	if _, ok := m.canAcceptRequestLocked(req); !ok {
-		logger.Warnw("can not accept request", nil)
-		return errors.ErrNotEnoughCPU
+
+	// BEGIN OPENVIDU BLOCK
+	// Fix error type return
+	if fields, ok := m.canAcceptRequestLocked(req); !ok {
+		err := reasonToError(fields)
+		logger.Warnw("can not accept request", err)
+		return err
 	}
+	// END OPENVIDU BLOCK
 
 	m.requests.Inc()
 	var cpuHold float64
@@ -563,6 +585,7 @@ func (m *Monitor) updateEgressStats(stats *hwstats.ProcStats) {
 }
 
 // BEGIN OPENVIDU BLOCK
+
 // TODO: if at some point any other Golang service requires host-level CPU monitoring, then it will
 // probably be worth forking livekit/protocol hwstats package to support it and share the code.
 func (m *Monitor) monitorHostCpu() {
@@ -585,6 +608,57 @@ func (m *Monitor) monitorHostCpu() {
 		}
 		prev = next
 	}
+}
+
+// getAvailableDiskSpaceMB returns the available disk space in MB for the given path.
+// Returns 0 and an error if the check fails.
+func getAvailableDiskSpaceMB(path string) (float64, error) {
+	var stat syscall.Statfs_t
+	if err := syscall.Statfs(path, &stat); err != nil {
+		return 0, err
+	}
+	// Bavail = free blocks available to unprivileged user
+	// Bsize = fundamental block size
+	availableBytes := stat.Bavail * uint64(stat.Bsize)
+	const mb = 1024.0 * 1024.0
+	return float64(availableBytes) / mb, nil
+}
+
+func (m *Monitor) checkDiskSpace() (bool, float64) {
+	if m.minDiskSpaceMB < 0 {
+		// Disk check explicitly disabled
+		return true, 0
+	}
+
+	availableMB, err := getAvailableDiskSpaceMB(config.TmpDir)
+	if err != nil {
+		logger.Warnw("failed to check disk space, allowing request", err, "path", config.TmpDir)
+		// On error, allow the request (fail-open) to avoid blocking egress unnecessarily
+		return true, 0
+	}
+
+	return availableMB >= m.minDiskSpaceMB, availableMB
+}
+
+// Extracts the "reason" field from the fields slice and returns the associated error object
+func reasonToError(fields []interface{}) error {
+	for i := 0; i < len(fields)-1; i += 2 {
+		if key, ok := fields[i].(string); ok && key == "reason" {
+			if reason, ok := fields[i+1].(string); ok {
+				switch reason {
+				case "memory":
+					return errors.ErrNotEnoughMemory
+				case "disk":
+					return errors.ErrNotEnoughDisk
+				case "pulse clients":
+					return errors.ErrTooManyPulseClients
+				case "cpu":
+					return errors.ErrNotEnoughCPU
+				}
+			}
+		}
+	}
+	return errors.ErrNotEnoughCPU // fallback
 }
 
 // END OPENVIDU BLOCK
