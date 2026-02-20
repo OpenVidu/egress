@@ -99,6 +99,11 @@ func ChromeError(err error) error {
 // other errors
 
 var (
+	// BEGIN OPENVIDU BLOCK
+	ErrNotEnoughMemory     = psrpc.NewErrorf(psrpc.Unavailable, "not enough memory")
+	ErrNotEnoughDisk       = psrpc.NewErrorf(psrpc.Unavailable, "not enough disk space")
+	ErrTooManyPulseClients = psrpc.NewErrorf(psrpc.Unavailable, "too many pulse clients")
+	// END OPENVIDU BLOCK
 	ErrNonStreamingPipeline       = psrpc.NewErrorf(psrpc.InvalidArgument, "UpdateStream called on non-streaming egress")
 	ErrNoCompatibleCodec          = psrpc.NewErrorf(psrpc.InvalidArgument, "no supported codec is compatible with all outputs")
 	ErrNoCompatibleFileOutputType = psrpc.NewErrorf(psrpc.InvalidArgument, "no supported file output type is compatible with the selected codecs")

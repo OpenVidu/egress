@@ -11,12 +11,14 @@ type OpenViduConfig struct {
 	// By default if a high CPU usage is detected for a sustained period of time
 	// the most CPU consuming egress will be killed.
 	DisableCpuOverloadKiller bool `yaml:"disable_cpu_overload_killer,omitempty"`
-	// UseGlobalCpuMonitoring enables system-wide CPU monitoring instead of
-	// tracking only egress subprocess CPU usage. When enabled, the monitor
-	// uses the actual idle CPU of the host to determine if new egress requests
-	// can be accepted. This is useful when other CPU-intensive processes run
-	// on the same host alongside egress.
+	// Enables system-wide CPU monitoring instead of tracking only egress subprocess
+	// CPU usage. When enabled, the monitor uses the actual idle CPU of the host to
+	// determine if new egress requests can be accepted. This is useful when other
+	// CPU-intensive processes run on the same host alongside egress.
 	UseGlobalCpuMonitoring bool `yaml:"use_global_cpu_monitoring,omitempty"`
+	// Minimum available disk space in MB required to accept new egress requests.
+	// Default: 512 MB. Set to a negative value (e.g., -1) to disable disk space checking.
+	MinDiskSpaceMB float64 `yaml:"min_disk_space_mb,omitempty"`
 }
 
 // END OPENVIDU BLOCK
