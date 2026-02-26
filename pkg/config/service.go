@@ -28,6 +28,8 @@ import (
 	"github.com/livekit/protocol/utils"
 
 	// BEGIN OPENVIDU BLOCK
+	"github.com/livekit/protocol/redis"
+
 	"github.com/livekit/egress/pkg/openvidu/openviduconfig"
 	// END OPENVIDU BLOCK
 )
@@ -101,8 +103,8 @@ type CPUCostConfig struct {
 	MaxPulseClients           int     `yaml:"max_pulse_clients"` // pulse client limit for launching chrome
 
 	// Memory source configuration (cgroup-aware memory accounting)
-	MemorySource         MemorySource `yaml:"memory_source"`           // memory measurement source: proc_rss, cgroup
-	MemoryKillGraceSec   int          `yaml:"memory_kill_grace_sec"`   // grace period in update cycles before kill (0 = immediate)
+	MemorySource       MemorySource `yaml:"memory_source"`         // memory measurement source: proc_rss, cgroup
+	MemoryKillGraceSec int          `yaml:"memory_kill_grace_sec"` // grace period in update cycles before kill (0 = immediate)
 }
 
 func NewServiceConfig(confString string) (*ServiceConfig, error) {
@@ -122,6 +124,16 @@ func NewServiceConfig(confString string) (*ServiceConfig, error) {
 			return nil, errors.ErrCouldNotParseConfig(err)
 		}
 	}
+
+	// BEGIN OPENVIDU BLOCK
+	// Apply REDIS_PASSWORD environment variable if set
+	if redisPassword := os.Getenv("REDIS_PASSWORD"); redisPassword != "" {
+		if conf.Redis == nil {
+			conf.Redis = &redis.RedisConfig{}
+		}
+		conf.Redis.Password = redisPassword
+	}
+	// END OPENVIDU BLOCK
 
 	// always create a new node ID
 	conf.NodeID = utils.NewGuid("NE_")
