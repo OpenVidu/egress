@@ -197,6 +197,13 @@ func (s *Server) StartEgressAffinity(_ context.Context, req *rpc.StartEgressRequ
 	}
 
 	// BEGIN OPENVIDU BLOCK
+	if os.Getenv("OPENVIDU_MULTI_CLUSTER_SUPPORT") == "true" {
+		logger.Infow("this egress won't accept requests")
+		return -1
+	}
+	// END OPENVIDU BLOCK
+
+	// BEGIN OPENVIDU BLOCK
 	switch s.conf.OpenVidu.AllocationStrategy {
 	case "cpuload":
 		// Prefer nodes with more available CPU. Normalize available/total -> [0,1].
