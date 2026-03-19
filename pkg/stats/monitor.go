@@ -17,13 +17,11 @@ package stats
 import (
 	"cmp"
 	"fmt"
-	"runtime"
 	"sort"
 	"syscall"
 	"time"
 
 	"github.com/linkdata/deadlock"
-	"github.com/mackerelio/go-osstat/cpu"
 	"github.com/pbnjay/memory"
 	"github.com/prometheus/client_golang/prometheus"
 	"go.uber.org/atomic"
@@ -32,6 +30,7 @@ import (
 	"github.com/livekit/protocol/rpc"
 	"github.com/livekit/protocol/utils/hwstats"
 
+	"github.com/OpenVidu/openvidu-golang-utils/monitor"
 	"github.com/livekit/egress/pkg/config"
 	"github.com/livekit/egress/pkg/errors"
 	"github.com/livekit/egress/pkg/pipeline/source/pulse"
@@ -59,7 +58,7 @@ type Monitor struct {
 	// BEGIN OPENVIDU BLOCK
 	disableCpuOverloadKiller bool
 	useGlobalCpuMonitoring   bool
-	hostCpuIdle              atomic.Float64
+	hostCpuMonitor           *monitor.Monitor
 	minDiskSpaceMB           float64
 	// END OPENVIDU BLOCK
 
@@ -146,7 +145,8 @@ func NewMonitor(conf *config.ServiceConfig, svc Service) (*Monitor, error) {
 	// BEGIN OPENVIDU BLOCK
 	if m.useGlobalCpuMonitoring {
 		logger.Infow("global CPU monitoring enabled, reading from /proc/stat")
-		go m.monitorHostCpu()
+		m.hostCpuMonitor = monitor.NewMonitor(monitor.WithLogger(logger.GetLogger()))
+		m.hostCpuMonitor.Start()
 	}
 	// END OPENVIDU BLOCK
 
@@ -563,7 +563,7 @@ func (m *Monitor) getCPUUsageLocked() (total, available, pending, used float64) 
 	// BEGIN OPENVIDU BLOCK
 	if m.useGlobalCpuMonitoring {
 		// Use true host-level CPU idle from /proc/stat
-		available = m.hostCpuIdle.Load()*m.cpuCostConfig.MaxCpuUtilization - pending
+		available = m.hostCpuMonitor.GetHostCpuIdle()*m.cpuCostConfig.MaxCpuUtilization - pending
 	} else {
 		// Original behavior: track only egress subprocess CPU usage.
 		// This assumes egress is the only CPU-intensive workload in the container.
@@ -764,27 +764,9 @@ func (m *Monitor) checkMemoryKill(maxMemoryEgress string) {
 
 // BEGIN OPENVIDU BLOCK
 
-// TODO: if at some point any other Golang service requires host-level CPU monitoring, then it will
-// probably be worth forking livekit/protocol hwstats package to support it and share the code.
-func (m *Monitor) monitorHostCpu() {
-	numCPU := float64(runtime.NumCPU())
-	prev, _ := cpu.Get()
-	m.hostCpuIdle.Store(numCPU)
-
-	ticker := time.NewTicker(time.Second)
-	defer ticker.Stop()
-
-	for range ticker.C {
-		next, err := cpu.Get()
-		if err != nil {
-			logger.Errorw("failed retrieving host CPU idle", err)
-			continue
-		}
-		if d := next.Total - prev.Total; d > 0 {
-			idle := numCPU * float64(next.Idle-prev.Idle) / float64(d)
-			m.hostCpuIdle.Store(idle)
-		}
-		prev = next
+func (m *Monitor) Stop() {
+	if m.hostCpuMonitor != nil {
+		m.hostCpuMonitor.Stop()
 	}
 }
 

@@ -197,6 +197,10 @@ func (s *Server) Drain() {
 		time.Sleep(time.Second)
 	}
 
+	// BEGIN OPENVIDU BLOCK
+	s.monitor.Stop()
+	// END OPENVIDU BLOCK
+
 	s.psrpcServer.Shutdown()
 	logger.Infow("draining io client")
 	s.ioClient.Drain()
