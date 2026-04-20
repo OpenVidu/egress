@@ -2,6 +2,8 @@ module github.com/livekit/egress
 
 replace github.com/go-gst/go-gst => github.com/livekit/gst-go v0.0.0-20250701011214-e7f61abd14cb
 
+replace github.com/livekit/storage => github.com/OpenVidu/storage v0.0.0-20260420214602-9c57985b93dc
+
 go 1.25.0
 
 require (
