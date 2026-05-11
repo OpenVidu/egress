@@ -15,8 +15,8 @@
 # syntax=docker/dockerfile:1.6
 ARG TARGETPLATFORM
 ARG TEMPLATE_TAG=latest
-ARG GO_VERSION=1.24.5
-ARG LINT_VERSION=v1.64.2
+ARG GO_VERSION=1.26.1
+ARG LINT_VERSION=v2.11.3
 
 FROM livekit/egress-templates:$TEMPLATE_TAG AS template
 
@@ -111,7 +111,8 @@ COPY --from=1 /usr/local/go /usr/local/go
 ENV PATH="/usr/local/go/bin:${PATH}"
 
 # install chrome
-COPY --from=livekit/chrome-installer:125.0.6422.141 /chrome-installer /chrome-installer
+COPY --from=livekit/chrome-installer:146.0.7680.177-1 /chrome-installer /chrome-installer
+
 RUN /chrome-installer/install-chrome "$TARGETPLATFORM"
 
 # clean up

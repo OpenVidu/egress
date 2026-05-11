@@ -35,13 +35,9 @@ import (
 )
 
 const (
-	numWorkers = 5
-	maxBackoff = time.Minute * 1
-	// BEGIN OPENVIDU BLOCK
-	// Timeout changed from 20 seconds to 10 minutes to avoid premature shutdowns
-	// In possible bad network conditions
+	numWorkers                     = 5
+	maxBackoff                     = time.Minute * 1
 	unhealthyShutdownWatchdogDelay = 10 * time.Minute
-	// END OPENVIDU BLOCK
 )
 
 type SessionReporter interface {
@@ -269,7 +265,11 @@ func (c *sessionReporter) handleUpdate(w *worker, egressID string) {
 		if !c.setHealthy(true) {
 			logger.Infow("io connection restored", "egressID", u.info.EgressId)
 		}
-		requestType, outputType := egress.GetTypes(u.info.Request)
+		var typesInput any = u.info.Request
+		if e, ok := u.info.Request.(*livekit.EgressInfo_Replay); ok {
+			typesInput = e.Replay
+		}
+		requestType, outputType := egress.GetTypes(typesInput)
 		logger.Infow(strings.ToLower(u.info.Status.String()),
 			"egressID", u.info.EgressId,
 			"requestType", requestType,

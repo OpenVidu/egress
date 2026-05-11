@@ -181,6 +181,43 @@ func (r *Runner) testStream(t *testing.T) {
 					outputType:  types.OutputTypeRaw,
 				},
 			},
+
+			// -------- Template --------
+
+			{
+				name:        "Template",
+				requestType: types.RequestTypeTemplate,
+				publishOptions: publishOptions{
+					audioCodec: types.MimeTypeOpus,
+					videoCodec: types.MimeTypeVP8,
+					layout:     "speaker",
+				},
+				streamOptions: &streamOptions{
+					streamUrls: []string{rtmpUrl1, badRtmpUrl1},
+					outputType: types.OutputTypeRTMP,
+				},
+			},
+
+			// -------- Media ----------
+
+			{
+				name:        "Media/ParticipantVideoStream",
+				requestType: types.RequestTypeMedia,
+				publishOptions: publishOptions{
+					audioCodec: types.MimeTypeOpus,
+					videoCodec: types.MimeTypeVP8,
+					mediaParticipantVideo: &livekit.ParticipantVideo{
+						Identity: "set-at-runtime",
+					},
+					audioRoutes: []*livekit.AudioRoute{{
+						Match: &livekit.AudioRoute_TrackId{TrackId: "set-at-runtime"},
+					}},
+				},
+				streamOptions: &streamOptions{
+					streamUrls: []string{rtmpUrl1, badRtmpUrl1},
+					outputType: types.OutputTypeRTMP,
+				},
+			},
 		} {
 			if !r.run(t, test, r.runStreamTest) {
 				return
@@ -195,7 +232,7 @@ func (r *Runner) runStreamTest(t *testing.T, test *testCase) {
 		return
 	}
 
-	req := r.build(test)
+	req := r.buildRequest(test)
 
 	ctx := context.Background()
 	urls := streamUrls[test.streamOptions.outputType]
@@ -286,7 +323,7 @@ func (r *Runner) runStreamTest(t *testing.T, test *testCase) {
 
 func (r *Runner) verifyStreams(t *testing.T, tc *testCase, p *config.PipelineConfig, urls ...string) {
 	for _, url := range urls {
-		info := verify(t, url, p, nil, types.EgressTypeStream, false, r.sourceFramerate, false)
+		info := verify(t, url, p, nil, types.EgressTypeStream, r.sourceFramerate, false)
 		if tc != nil && tc.contentCheck != nil && info != nil {
 			tc.contentCheck(t, url, info)
 		}
@@ -294,7 +331,7 @@ func (r *Runner) verifyStreams(t *testing.T, tc *testCase, p *config.PipelineCon
 }
 
 func (r *Runner) runWebsocketTest(t *testing.T, test *testCase) {
-	filepath := path.Join(r.FilePrefix, test.streamOptions.rawFileName)
+	filepath := path.Join(r.FilePrefix, test.rawFileName)
 	wss := newTestWebsocketServer(filepath)
 	s := httptest.NewServer(http.HandlerFunc(wss.handleWebsocket))
 	test.websocketUrl = "ws" + strings.TrimPrefix(s.URL, "http")
@@ -313,7 +350,7 @@ func (r *Runner) runWebsocketTest(t *testing.T, test *testCase) {
 	time.Sleep(time.Second * 30)
 
 	res := r.stopEgress(t, egressID)
-	verify(t, filepath, p, res, types.EgressTypeWebsocket, r.Muting, r.sourceFramerate, false)
+	verify(t, filepath, p, res, types.EgressTypeWebsocket, r.sourceFramerate, false)
 }
 
 type websocketTestServer struct {

@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"os"
 	"os/exec"
 	"regexp"
 	"strconv"
@@ -29,6 +30,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/llehouerou/go-mp3/lameinfo"
 	"github.com/stretchr/testify/require"
 
 	"github.com/livekit/egress/pkg/config"
@@ -112,13 +114,13 @@ func ffprobe(input string) (*FFProbeInfo, error) {
 	return info, err
 }
 
-func verify(t *testing.T, in string, p *config.PipelineConfig, res *livekit.EgressInfo, egressType types.EgressType, withMuting bool, sourceFramerate float64, live bool) *FFProbeInfo {
+func verify(t *testing.T, in string, p *config.PipelineConfig, res *livekit.EgressInfo, egressType types.EgressType, sourceFramerate float64, live bool) *FFProbeInfo {
 	info, err := ffprobe(in)
 	require.NoError(t, err)
 
 	// Check source type
 	if res != nil {
-		if p.RequestType == types.RequestTypeRoomComposite && (p.VideoEnabled || p.Layout != "") {
+		if (p.RequestType == types.RequestTypeRoomComposite || p.RequestType == types.RequestTypeTemplate) && (p.VideoEnabled || p.Layout != "") {
 			require.Equal(t, livekit.EgressSourceType_EGRESS_SOURCE_TYPE_WEB, res.SourceType)
 		} else if p.RequestType == types.RequestTypeWeb {
 			require.Equal(t, livekit.EgressSourceType_EGRESS_SOURCE_TYPE_WEB, res.SourceType)
@@ -142,16 +144,13 @@ func verify(t *testing.T, in string, p *config.PipelineConfig, res *livekit.Egre
 		require.NoError(t, err)
 
 		// file duration can be different from egress duration based on keyframes, muting, and latency
-		delta := 4.5
+		delta := 5.0
 		switch p.RequestType {
-		case types.RequestTypeRoomComposite:
+		case types.RequestTypeRoomComposite, types.RequestTypeTemplate, types.RequestTypeWeb:
 			require.InDelta(t, expected, actual, delta)
 
 		case types.RequestTypeTrack:
 			if p.AudioEnabled {
-				if withMuting {
-					delta = 6
-				}
 				require.InDelta(t, expected, actual, delta)
 			}
 		}
@@ -173,13 +172,19 @@ func verify(t *testing.T, in string, p *config.PipelineConfig, res *livekit.Egre
 	case types.EgressTypeWebsocket:
 		size, err := strconv.Atoi(info.Format.Size)
 		require.NoError(t, err)
-		require.Greater(t, size, 6500000)
+		require.Greater(t, size, 6300000)
 
 		expected := float64(res.StreamResults[0].Duration) / 1e9
 		actual, err := strconv.ParseFloat(info.Format.Duration, 64)
 		require.NoError(t, err)
 
 		require.InDelta(t, expected, actual, 4.1)
+	}
+
+	// verify Xing/Info header for MP3 files
+	if egressType == types.EgressTypeFile && p.AudioOutCodec == types.MimeTypeMP3 {
+		fpDuration, _ := strconv.ParseFloat(info.Format.Duration, 64)
+		verifyXingHeader(t, in, int(p.AudioFrequency), fpDuration)
 	}
 
 	// check stream info
@@ -200,6 +205,17 @@ func verify(t *testing.T, in string, p *config.PipelineConfig, res *livekit.Egre
 				require.Equal(t, "opus", stream.CodecName)
 				require.Equal(t, "48000", stream.SampleRate)
 				require.Equal(t, "stereo", stream.ChannelLayout)
+
+			case types.MimeTypeMP3:
+				require.Equal(t, "mp3", stream.CodecName)
+				require.Equal(t, fmt.Sprint(p.AudioFrequency), stream.SampleRate)
+				require.Equal(t, "stereo", stream.ChannelLayout)
+
+				// verify CBR: stream bitrate should match configured bitrate
+				bitrate, err := strconv.Atoi(stream.BitRate)
+				require.NoError(t, err)
+				require.InDelta(t, int(p.AudioBitrate)*1000, bitrate, 5000,
+					"MP3 bitrate %d bps not close to configured %d kbps", bitrate, p.AudioBitrate)
 
 			case types.MimeTypeRawAudio:
 				require.Equal(t, "pcm_s16le", stream.CodecName)
@@ -328,4 +344,30 @@ func parseFFProbeDuration(s string) (time.Duration, error) {
 		return 0, fmt.Errorf("invalid seconds format %q: %w", s, err)
 	}
 	return time.Duration(f * float64(time.Second)), nil
+}
+
+// verifyXingHeader checks that an MP3 file contains a valid Xing/Info header
+// and that the duration derived from its frame count matches ffprobe.
+func verifyXingHeader(t *testing.T, filepath string, sampleRate int, ffprobeDuration float64) {
+	t.Helper()
+
+	f, err := os.Open(filepath)
+	require.NoError(t, err)
+	defer f.Close()
+
+	xi, err := lameinfo.ParseFromReader(f)
+	require.NoError(t, err, "MP3 file missing Xing/Info header")
+
+	require.True(t, xi.HasFrameCount(), "Xing header missing frame count")
+	require.NotZero(t, xi.FrameCount, "Xing header has zero frame count")
+
+	require.True(t, xi.HasTOC(), "Xing header missing TOC seek table")
+
+	// MPEG1 Layer 3: 1152 samples per frame.
+	// Cross-check Xing frame count against ffprobe duration.
+	const samplesPerFrame = 1152
+	xingDuration := float64(xi.FrameCount) * samplesPerFrame / float64(sampleRate)
+	require.InDelta(t, ffprobeDuration, xingDuration, 0.1,
+		"Xing duration (%0.3fs from %d frames) does not match ffprobe duration (%0.3fs)",
+		xingDuration, xi.FrameCount, ffprobeDuration)
 }

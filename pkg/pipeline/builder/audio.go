@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/go-gst/go-gst/gst"
+	"github.com/go-gst/go-gst/gst/app"
 	"github.com/linkdata/deadlock"
 	"go.uber.org/atomic"
 
@@ -32,10 +33,6 @@ import (
 )
 
 const (
-	audioChannelStereo = 0
-	audioChannelLeft   = 1
-	audioChannelRight  = 2
-
 	leakyQueue    = true
 	blockingQueue = false
 
@@ -49,7 +46,7 @@ type AudioBin struct {
 
 	mu          deadlock.Mutex
 	nextID      int
-	nextChannel int
+	nextChannel livekit.AudioChannel
 	names       map[string]string
 
 	audioPacer *audioPacer
@@ -136,6 +133,7 @@ func BuildAudioBin(pipeline *gstreamer.Pipeline, p *config.PipelineConfig) error
 
 		pipeline.AddOnTrackAdded(b.onTrackAdded)
 		pipeline.AddOnTrackRemoved(b.onTrackRemoved)
+		pipeline.AddOnSourceBinReset(b.onSourceBinReset)
 	}
 
 	if len(p.GetEncodedOutputs()) > 1 {
@@ -147,7 +145,7 @@ func BuildAudioBin(pipeline *gstreamer.Pipeline, p *config.PipelineConfig) error
 			return err
 		}
 	} else {
-		queue, err := gstreamer.BuildQueue(fmt.Sprintf("%s_queue", audioBinName), p.Latency.PipelineLatency, leakyQueue)
+		queue, err := gstreamer.BuildQueue(fmt.Sprintf("%s_queue", audioBinName), p.Latency.PipelineLatency, p.Live)
 		if err != nil {
 			return errors.ErrGstPipelineError(err)
 		}
@@ -204,7 +202,7 @@ func (b *AudioBin) buildWebInput() error {
 		return err
 	}
 
-	if err = addAudioConverter(b.bin, b.conf, audioChannelStereo, leakyQueue); err != nil {
+	if err = addAudioConverter(b.bin, b.conf, livekit.AudioChannel_AUDIO_CHANNEL_BOTH, leakyQueue); err != nil {
 		return err
 	}
 	if b.conf.AudioTranscoding {
@@ -222,8 +220,10 @@ func (b *AudioBin) buildSDKInput() error {
 			return err
 		}
 	}
-	if err := b.addAudioTestSrcBin(); err != nil {
-		return err
+	if b.conf.Live {
+		if err := b.addAudioTestSrcBin(); err != nil {
+			return err
+		}
 	}
 	if err := b.addMixer(); err != nil {
 		return err
@@ -241,6 +241,10 @@ func (b *AudioBin) addAudioAppSrcBin(ts *config.TrackSource) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
+	return b.addAudioAppSrcBinLocked(ts)
+}
+
+func (b *AudioBin) addAudioAppSrcBinLocked(ts *config.TrackSource) error {
 	name := fmt.Sprintf("%s_%d", ts.TrackID, b.nextID)
 	b.nextID++
 	b.names[ts.TrackID] = name
@@ -249,9 +253,14 @@ func (b *AudioBin) addAudioAppSrcBin(ts *config.TrackSource) error {
 	appSrcBin.SetEOSFunc(func() bool {
 		return false
 	})
-	ts.AppSrc.Element.SetArg("format", "time")
-	if err := ts.AppSrc.Element.SetProperty("is-live", true); err != nil {
+	ts.AppSrc.SetArg("format", "time")
+	if err := ts.AppSrc.SetProperty("is-live", b.conf.Live); err != nil {
 		return err
+	}
+	if !b.conf.Live {
+		if err := ts.AppSrc.SetProperty("block", true); err != nil {
+			return err
+		}
 	}
 	if err := appSrcBin.AddElement(ts.AppSrc.Element); err != nil {
 		return err
@@ -259,7 +268,7 @@ func (b *AudioBin) addAudioAppSrcBin(ts *config.TrackSource) error {
 
 	switch ts.MimeType {
 	case types.MimeTypeOpus:
-		if err := ts.AppSrc.Element.SetProperty("caps", gst.NewCapsFromString(fmt.Sprintf(
+		if err := ts.AppSrc.SetProperty("caps", gst.NewCapsFromString(fmt.Sprintf(
 			"application/x-rtp,media=audio,payload=%d,encoding-name=OPUS,clock-rate=%d",
 			ts.PayloadType, ts.ClockRate,
 		))); err != nil {
@@ -281,7 +290,7 @@ func (b *AudioBin) addAudioAppSrcBin(ts *config.TrackSource) error {
 		}
 
 	case types.MimeTypePCMU:
-		if err := ts.AppSrc.Element.SetProperty("caps", gst.NewCapsFromString(fmt.Sprintf(
+		if err := ts.AppSrc.SetProperty("caps", gst.NewCapsFromString(fmt.Sprintf(
 			"application/x-rtp,media=audio,payload=%d,encoding-name=PCMU,clock-rate=%d",
 			ts.PayloadType, ts.ClockRate,
 		))); err != nil {
@@ -303,7 +312,7 @@ func (b *AudioBin) addAudioAppSrcBin(ts *config.TrackSource) error {
 		}
 
 	case types.MimeTypePCMA:
-		if err := ts.AppSrc.Element.SetProperty("caps", gst.NewCapsFromString(fmt.Sprintf(
+		if err := ts.AppSrc.SetProperty("caps", gst.NewCapsFromString(fmt.Sprintf(
 			"application/x-rtp,media=audio,payload=%d,encoding-name=PCMA,clock-rate=%d",
 			ts.PayloadType, ts.ClockRate,
 		))); err != nil {
@@ -333,7 +342,7 @@ func (b *AudioBin) addAudioAppSrcBin(ts *config.TrackSource) error {
 		addAudioConvertFunc = b.addAudioConvertWithPitch
 	}
 
-	if err := addAudioConvertFunc(appSrcBin, b.conf, b.getChannel(ts), blockingQueue); err != nil {
+	if err := addAudioConvertFunc(appSrcBin, b.conf, b.getChannelLocked(ts), blockingQueue); err != nil {
 		return err
 	}
 
@@ -354,24 +363,71 @@ func (b *AudioBin) addAudioAppSrcBin(ts *config.TrackSource) error {
 	return nil
 }
 
-func (b *AudioBin) getChannel(ts *config.TrackSource) int {
+func (b *AudioBin) onSourceBinReset(ts *config.TrackSource) error {
+	if ts.TrackKind != lksdk.TrackKindAudio {
+		return nil
+	}
+	return b.resetAudioAppSrcBin(ts)
+}
+
+func (b *AudioBin) resetAudioAppSrcBin(ts *config.TrackSource) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	oldName, ok := b.names[ts.TrackID]
+	if !ok {
+		return errors.New("track already removed, cannot reset audio source bin")
+	}
+
+	if b.bin.GetState() > gstreamer.StateRunning {
+		return errors.New("pipeline stopping, cannot reset audio source bin")
+	}
+
+	// Force-remove old bin (blocks on GLib main loop, safe to hold b.mu since
+	// ForceRemoveSourceBin only acquires gstreamer.Bin's internal mutex)
+	if err := b.bin.ForceRemoveSourceBin(oldName); err != nil {
+		return fmt.Errorf("failed to force remove audio source bin: %w", err)
+	}
+
+	newElement, err := gst.NewElementWithName("appsrc", fmt.Sprintf("app_%s", ts.TrackID))
+	if err != nil {
+		return errors.ErrGstPipelineError(err)
+	}
+	ts.AppSrc = app.SrcFromElement(newElement)
+
+	if err := b.addAudioAppSrcBinLocked(ts); err != nil {
+		return fmt.Errorf("failed to add new audio source bin: %w", err)
+	}
+
+	logger.Infow("audio source bin reset complete", "trackID", ts.TrackID, "newBin", b.names[ts.TrackID])
+	return nil
+}
+
+func (b *AudioBin) getChannelLocked(ts *config.TrackSource) livekit.AudioChannel {
+	if ts.AudioChannel != nil {
+		return *ts.AudioChannel
+	}
+
 	switch b.conf.AudioMixing {
 	case livekit.AudioMixing_DEFAULT_MIXING:
-		return audioChannelStereo
+		return livekit.AudioChannel_AUDIO_CHANNEL_BOTH
 
 	case livekit.AudioMixing_DUAL_CHANNEL_AGENT:
 		if ts.ParticipantKind == lksdk.ParticipantAgent {
-			return audioChannelLeft
+			return livekit.AudioChannel_AUDIO_CHANNEL_LEFT
 		}
-		return audioChannelRight
+		return livekit.AudioChannel_AUDIO_CHANNEL_RIGHT
 
 	case livekit.AudioMixing_DUAL_CHANNEL_ALTERNATE:
-		next := b.nextChannel
-		b.nextChannel++
-		return next%2 + 1
+		if b.nextChannel == livekit.AudioChannel_AUDIO_CHANNEL_LEFT {
+			b.nextChannel = livekit.AudioChannel_AUDIO_CHANNEL_RIGHT
+		} else {
+			b.nextChannel = livekit.AudioChannel_AUDIO_CHANNEL_LEFT
+		}
+		return b.nextChannel
 	}
 
-	return audioChannelStereo
+	return livekit.AudioChannel_AUDIO_CHANNEL_BOTH
 }
 
 func (b *AudioBin) addAudioTestSrcBin() error {
@@ -399,7 +455,7 @@ func (b *AudioBin) addAudioTestSrcBin() error {
 		return errors.ErrGstPipelineError(err)
 	}
 
-	audioCaps, err := newAudioCapsFilter(b.conf, audioChannelStereo)
+	audioCaps, err := newAudioCapsFilter(b.conf, livekit.AudioChannel_AUDIO_CHANNEL_BOTH)
 	if err != nil {
 		return err
 	}
@@ -419,7 +475,7 @@ func (b *AudioBin) addMixer() error {
 		return errors.ErrGstPipelineError(err)
 	}
 
-	mixedCaps, err := newAudioCapsFilter(b.conf, audioChannelStereo)
+	mixedCaps, err := newAudioCapsFilter(b.conf, livekit.AudioChannel_AUDIO_CHANNEL_BOTH)
 	if err != nil {
 		return err
 	}
@@ -456,10 +512,13 @@ func (b *AudioBin) addEncoder() error {
 		if err != nil {
 			return errors.ErrGstPipelineError(err)
 		}
-		if err = mp3enc.SetProperty("bitrate", int(b.conf.AudioBitrate)); err != nil {
+		// target=bitrate is required for cbr and bitrate to take effect;
+		// without it lamemp3enc defaults to quality-based VBR.
+		mp3enc.SetArg("target", "bitrate")
+		if err = mp3enc.SetProperty("cbr", true); err != nil {
 			return errors.ErrGstPipelineError(err)
 		}
-		if err = mp3enc.SetProperty("cbr", true); err != nil {
+		if err = mp3enc.SetProperty("bitrate", int(b.conf.AudioBitrate)); err != nil {
 			return errors.ErrGstPipelineError(err)
 		}
 		return b.bin.AddElement(mp3enc)
@@ -472,7 +531,7 @@ func (b *AudioBin) addEncoder() error {
 	}
 }
 
-func addAudioConverter(b *gstreamer.Bin, p *config.PipelineConfig, channel int, isLeaky bool) error {
+func addAudioConverter(b *gstreamer.Bin, p *config.PipelineConfig, channel livekit.AudioChannel, isLeaky bool) error {
 	rate, err := gstreamer.BuildAudioRate("audio_rate", audioRateTolerance)
 	if err != nil {
 		return err
@@ -526,20 +585,20 @@ func (b *AudioBin) installPitchProbes() {
 					return gst.PadProbeOK
 				}
 
-				live, min, max := q.ParseLatency()
+				live, minimum, maximum := q.ParseLatency()
 				// Normalize: ensure min <= max
-				if min > max {
-					logger.Debugw("normalizing min latency to 0", "min", min)
-					min = 0
+				if minimum > maximum {
+					logger.Debugw("normalizing min latency to 0", "min", minimum)
+					minimum = 0
 				}
-				q.SetLatency(live, min, max)
+				q.SetLatency(live, minimum, maximum)
 				return gst.PadProbeOK
 			},
 		)
 	}
 }
 
-func (b *AudioBin) addAudioConvertWithPitch(bin *gstreamer.Bin, p *config.PipelineConfig, channel int, isLeaky bool) error {
+func (b *AudioBin) addAudioConvertWithPitch(bin *gstreamer.Bin, p *config.PipelineConfig, channel livekit.AudioChannel, isLeaky bool) error {
 	// add audio rate element to handle discontinuities or codec DTX
 	rate, err := gstreamer.BuildAudioRate("audio_rate", audioRateTolerance)
 	if err != nil {
@@ -594,9 +653,9 @@ func (b *AudioBin) addAudioConvertWithPitch(bin *gstreamer.Bin, p *config.Pipeli
 }
 
 // F32 caps used only around `pitch`
-func newAudioFloatCapsFilter(p *config.PipelineConfig, channel int) (*gst.Element, error) {
+func newAudioFloatCapsFilter(p *config.PipelineConfig, channel livekit.AudioChannel) (*gst.Element, error) {
 	var channelCaps string
-	if channel == audioChannelStereo {
+	if channel == livekit.AudioChannel_AUDIO_CHANNEL_BOTH {
 		channelCaps = "channels=2"
 	} else {
 		channelCaps = fmt.Sprintf("channels=1,channel-mask=(bitmask)0x%d", channel)
@@ -617,9 +676,9 @@ func newAudioFloatCapsFilter(p *config.PipelineConfig, channel int) (*gst.Elemen
 	return cf, nil
 }
 
-func newAudioCapsFilter(p *config.PipelineConfig, channel int) (*gst.Element, error) {
+func newAudioCapsFilter(p *config.PipelineConfig, channel livekit.AudioChannel) (*gst.Element, error) {
 	var channelCaps string
-	if channel == audioChannelStereo {
+	if channel == livekit.AudioChannel_AUDIO_CHANNEL_BOTH {
 		channelCaps = "channels=2"
 	} else {
 		channelCaps = fmt.Sprintf("channels=1,channel-mask=(bitmask)0x%d", channel)
@@ -632,12 +691,7 @@ func newAudioCapsFilter(p *config.PipelineConfig, channel int) (*gst.Element, er
 			"audio/x-raw,format=S16LE,layout=interleaved,rate=48000,%s",
 			channelCaps,
 		))
-	case types.MimeTypeAAC:
-		caps = gst.NewCapsFromString(fmt.Sprintf(
-			"audio/x-raw,format=S16LE,layout=interleaved,rate=%d,%s",
-			p.AudioFrequency, channelCaps,
-		))
-	case types.MimeTypeMP3:
+	case types.MimeTypeAAC, types.MimeTypeMP3:
 		caps = gst.NewCapsFromString(fmt.Sprintf(
 			"audio/x-raw,format=S16LE,layout=interleaved,rate=%d,%s",
 			p.AudioFrequency, channelCaps,

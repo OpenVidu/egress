@@ -59,12 +59,14 @@ type BaseConfig struct {
 	S3AssumeRoleExternalID string                  `yaml:"s3_assume_role_external_id"` // if set, this external ID is used by default for S3 uploads
 
 	// advanced
-	Insecure             bool                                `yaml:"insecure"`               // allow chrome to connect to an insecure websocket
-	Debug                DebugConfig                         `yaml:"debug"`                  // create dot file on internal error
-	ChromeFlags          map[string]interface{}              `yaml:"chrome_flags"`           // additional flags to pass to Chrome
-	Latency              LatencyConfig                       `yaml:"latency"`                // gstreamer latencies, modifying these may break the service
-	LatencyOverrides     map[types.RequestType]LatencyConfig `yaml:"latency_overrides"`      // latency overrides for different request types, experimental only, will be removed
-	AudioTempoController AudioTempoController                `yaml:"audio_tempo_controller"` // audio tempo controller
+	Insecure                      bool                                `yaml:"insecure"`                           // allow chrome to connect to an insecure websocket, bypasses chrome LNA checks
+	Debug                         DebugConfig                         `yaml:"debug"`                              // create dot file on internal error
+	ChromeFlags                   map[string]interface{}              `yaml:"chrome_flags"`                       // additional flags to pass to Chrome
+	Latency                       LatencyConfig                       `yaml:"latency"`                            // gstreamer latencies, modifying these may break the service
+	LatencyOverrides              map[types.RequestType]LatencyConfig `yaml:"latency_overrides"`                  // latency overrides for different request types, experimental only, will be removed
+	EnableOneShotSenderReportSync bool                                `yaml:"enable_one_shot_sender_report_sync"` // temporary rollout flag enabling one-shot sender report correction for room composite / track requests that previously used audio PTS adjustment disabling
+	AudioTempoController          AudioTempoController                `yaml:"audio_tempo_controller"`             // audio tempo controller
+	TestOverrides                 TestOverrides                       `yaml:"test_overrides"`                     // set of config overrides for testing purposes
 }
 
 type SessionLimits struct {
@@ -90,7 +92,7 @@ type LatencyConfig struct {
 	RTPMaxAllowedTsDiff             time.Duration `ymal:"rtp_max_allowed_ts_diff"`                       // max allowed PTS discont. for a RTP stream, before applying PTS alignment
 	RTPMaxDriftAdjustment           time.Duration `ymal:"rtp_max_drift_adjustment,omitempty"`            // max allowed drift adjustment for a RTP stream
 	RTPDriftAdjustmentWindowPercent float64       `ymal:"rtp_drift_adjustment_window_percent,omitempty"` // how much to throttle drift adjustment, 0.0 disables it
-	OldPacketThreshold time.Duration `yaml:"old_packet_threshold,omitempty"` // syncrhonizer drops packets older than this, 0 to disable packet drops
+	OldPacketThreshold              time.Duration `yaml:"old_packet_threshold,omitempty"`                // syncrhonizer drops packets older than this, 0 to disable packet drops
 }
 
 type AudioTempoController struct {
@@ -130,7 +132,7 @@ func (c *BaseConfig) initLogger(values ...interface{}) error {
 	l := zl.WithValues(values...)
 
 	logger.SetLogger(l, "egress")
-	lksdk.SetLogger(medialogutils.NewOverrideLogger(nil))
+	lksdk.SetLogger(medialogutils.NewOverrideLogger(l.WithComponent("lksdk")))
 	return nil
 }
 

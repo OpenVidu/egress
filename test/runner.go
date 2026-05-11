@@ -33,7 +33,6 @@ import (
 	"github.com/livekit/protocol/logger"
 	"github.com/livekit/protocol/rpc"
 	"github.com/livekit/psrpc"
-	lksdk "github.com/livekit/server-sdk-go/v2"
 
 	"github.com/livekit/egress/pkg/config"
 )
@@ -43,7 +42,6 @@ type Runner struct {
 
 	svc             Server                   `yaml:"-"`
 	client          rpc.EgressClient         `yaml:"-"`
-	room            *lksdk.Room              `yaml:"-"`
 	updates         chan *livekit.EgressInfo `yaml:"-"`
 	sourceFramerate float64                  `yaml:"-"`
 	testNumber      int                      `yaml:"-"`
@@ -58,7 +56,6 @@ type Runner struct {
 	FilePrefix   string `yaml:"file_prefix"`
 	RoomName     string `yaml:"room_name"`
 	RoomBaseName string `yaml:"-"`
-	Muting       bool   `yaml:"muting"`
 	Dotfiles     bool   `yaml:"dot_files"`
 	Short        bool   `yaml:"short"`
 
@@ -70,6 +67,8 @@ type Runner struct {
 	ParticipantTestsOnly    bool `yaml:"participant_only"`
 	TrackCompositeTestsOnly bool `yaml:"track_composite_only"`
 	TrackTestsOnly          bool `yaml:"track_only"`
+	TemplateTestsOnly       bool `yaml:"template_only"`
+	MediaTestsOnly          bool `yaml:"media_only"`
 	EdgeCasesOnly           bool `yaml:"edge_cases_only"`
 
 	FileTestsOnly    bool `yaml:"file_only"`
@@ -120,6 +119,21 @@ func NewRunner(t *testing.T) *Runner {
 	case "track":
 		r.TrackTestsOnly = true
 		r.RoomName = fmt.Sprintf("track-integration-%d", rand.Intn(100))
+	case "template":
+		r.TemplateTestsOnly = true
+		r.RoomName = fmt.Sprintf("template-integration-%d", rand.Intn(100))
+	case "media":
+		r.MediaTestsOnly = true
+		r.RoomName = fmt.Sprintf("media-integration-%d", rand.Intn(100))
+	case "file-room":
+		r.shouldRun = runFile | runRoom | runWeb | runTemplate
+		r.RoomName = fmt.Sprintf("file-room-integration-%d", rand.Intn(100))
+	case "file-track":
+		r.shouldRun = runFile | runTrackComposite | runTrack
+		r.RoomName = fmt.Sprintf("file-track-integration-%d", rand.Intn(100))
+	case "file-media":
+		r.shouldRun = runFile | runMedia | runParticipant
+		r.RoomName = fmt.Sprintf("file-media-integration-%d", rand.Intn(100))
 	case "file":
 		r.FileTestsOnly = true
 		r.RoomName = fmt.Sprintf("file-integration-%d", rand.Intn(100))
@@ -184,45 +198,18 @@ func NewRunner(t *testing.T) *Runner {
 		r.RoomBaseName = r.RoomName
 	}
 
-	r.updateFlagset()
+	if r.shouldRun == 0 {
+		r.updateFlagset()
+	}
 
 	return r
 }
 
-func (r *Runner) connectRoom(t *testing.T, roomName string, codecs []livekit.Codec) {
-	if r.room != nil {
-		r.room.Disconnect()
-	}
-
-	opts := []lksdk.ConnectOption{}
-	if len(codecs) > 0 {
-		opts = append(opts, lksdk.WithCodecs(codecs))
-	}
-
-	room, err := lksdk.ConnectToRoom(r.WsUrl, lksdk.ConnectInfo{
-		APIKey:              r.ApiKey,
-		APISecret:           r.ApiSecret,
-		RoomName:            roomName,
-		ParticipantName:     "egress-sample",
-		ParticipantIdentity: fmt.Sprintf("sample-%d", rand.Intn(100)),
-	}, lksdk.NewRoomCallback(), opts...)
-	require.NoError(t, err)
-
-	r.room = room
-	r.RoomName = roomName
-}
-
 func (r *Runner) StartServer(t *testing.T, svc Server, bus psrpc.MessageBus, templateFs fs.FS) {
-	lksdk.SetLogger(logger.GetLogger())
 	r.svc = svc
 	t.Cleanup(func() {
-		if r.room != nil {
-			r.room.Disconnect()
-		}
 		r.svc.Shutdown(false, true)
 	})
-
-	r.connectRoom(t, r.RoomName, nil)
 
 	psrpcClient, err := rpc.NewEgressClient(rpc.ClientParams{Bus: bus})
 	require.NoError(t, err)

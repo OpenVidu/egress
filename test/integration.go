@@ -53,26 +53,23 @@ func (r *Runner) run(t *testing.T, test *testCase, f func(*testing.T, *testCase)
 	switch test.requestType {
 	case types.RequestTypeRoomComposite, types.RequestTypeWeb:
 		r.sourceFramerate = 30
-	case types.RequestTypeParticipant, types.RequestTypeTrackComposite, types.RequestTypeTrack:
+	case types.RequestTypeParticipant, types.RequestTypeTrackComposite, types.RequestTypeTrack, types.RequestTypeMedia:
 		r.sourceFramerate = 23.97
+	case types.RequestTypeTemplate:
+		if test.audioOnly && test.layout == "" && test.templateCustomBaseUrl == "" {
+			r.sourceFramerate = 23.97
+		} else {
+			r.sourceFramerate = 30
+		}
 	}
 
 	r.awaitIdle(t)
-	r.ensureRoomForTest(t, test)
+	r.setRoomNameForTest(test)
 
 	r.testNumber++
 	t.Run(fmt.Sprintf("%d/%s", r.testNumber, test.name), func(t *testing.T) {
-		audioMuting := r.Muting
-		videoMuting := r.Muting && test.audioCodec == ""
-
-		test.audioTrackID = r.publishSample(t, test.audioCodec, test.audioDelay, test.audioUnpublish, audioMuting)
-		if test.audioRepublish != 0 {
-			r.publishSample(t, test.audioCodec, test.audioRepublish, 0, audioMuting)
-		}
-		test.videoTrackID = r.publishSample(t, test.videoCodec, test.videoDelay, test.videoUnpublish, videoMuting)
-		if test.videoRepublish != 0 {
-			r.publishSample(t, test.videoCodec, test.videoRepublish, 0, videoMuting)
-		}
+		test.plan = planTest(test)
+		r.executePlan(t, test)
 
 		logger.Infow("test publish summary",
 			"test", test.name,
@@ -89,43 +86,29 @@ func (r *Runner) run(t *testing.T, test *testCase, f func(*testing.T, *testCase)
 	return !r.Short
 }
 
-func (r *Runner) ensureRoomForTest(t *testing.T, test *testCase) {
+func (r *Runner) setRoomNameForTest(test *testCase) {
 	desiredRoom := r.RoomBaseName
-	var codecs []livekit.Codec
 	switch test.audioCodec {
 	case types.MimeTypePCMU:
 		desiredRoom = fmt.Sprintf("%s-pcmu", r.RoomBaseName)
-		codecs = []livekit.Codec{{
-			Mime: string(types.MimeTypePCMU),
-		}}
 	case types.MimeTypePCMA:
 		desiredRoom = fmt.Sprintf("%s-pcma", r.RoomBaseName)
-		codecs = []livekit.Codec{{
-			Mime: string(types.MimeTypePCMA),
-		}}
 	}
-
-	if desiredRoom == "" || desiredRoom == r.RoomName {
+	if desiredRoom == "" {
 		return
 	}
-
-	r.connectRoom(t, desiredRoom, codecs)
+	r.RoomName = desiredRoom
 }
 
 func (r *Runner) awaitIdle(t *testing.T) {
 	r.svc.KillAll()
 	for i := 0; i < 30; i++ {
-		if r.svc.IsIdle() && len(r.room.LocalParticipant.TrackPublications()) == 0 {
+		if r.svc.IsIdle() {
 			return
 		}
 		time.Sleep(time.Second)
 	}
-
-	if !r.svc.IsIdle() {
-		t.Fatal("service not idle after 30s")
-	} else if len(r.room.LocalParticipant.TrackPublications()) != 0 {
-		t.Fatal("room still has tracks after 30s")
-	}
+	t.Fatal("service not idle after 30s")
 }
 
 func (r *Runner) startEgress(t *testing.T, req *rpc.StartEgressRequest) string {
@@ -157,6 +140,11 @@ func (r *Runner) sendRequest(t *testing.T, req *rpc.StartEgressRequest) *livekit
 	switch req.Request.(type) {
 	case *rpc.StartEgressRequest_Web:
 		require.Empty(t, info.RoomName)
+	case *rpc.StartEgressRequest_Replay:
+		replayReq := req.Request.(*rpc.StartEgressRequest_Replay).Replay
+		if _, ok := replayReq.Source.(*livekit.ExportReplayRequest_Web); ok {
+			require.Empty(t, info.RoomName)
+		}
 	default:
 		require.Equal(t, r.RoomName, info.RoomName)
 	}

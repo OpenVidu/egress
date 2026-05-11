@@ -26,12 +26,13 @@ import (
 	"google.golang.org/protobuf/encoding/protojson"
 	"gopkg.in/yaml.v3"
 
+	"go.opentelemetry.io/otel"
+
 	"github.com/livekit/protocol/egress"
 	"github.com/livekit/protocol/livekit"
 	"github.com/livekit/protocol/logger"
 	"github.com/livekit/protocol/rpc"
 	"github.com/livekit/protocol/utils"
-	"go.opentelemetry.io/otel"
 
 	"github.com/livekit/egress/pkg/config"
 	"github.com/livekit/egress/pkg/errors"
@@ -70,7 +71,11 @@ func (s *Server) StartEgress(ctx context.Context, req *rpc.StartEgressRequest) (
 		return nil, err
 	}
 
-	requestType, outputType := egress.GetTypes(p.Info.Request)
+	var typesInput any = p.Info.Request
+	if e, ok := p.Info.Request.(*livekit.EgressInfo_Replay); ok {
+		typesInput = e.Replay
+	}
+	requestType, outputType := egress.GetTypes(typesInput)
 	logger.Infow("request validated",
 		"egressID", req.EgressId,
 		"requestType", requestType,
@@ -151,6 +156,7 @@ func (s *Server) launchProcess(req *rpc.StartEgressRequest, info *livekit.Egress
 	s.monitor.UpdatePID(info.EgressId, cmd.Process.Pid)
 	go func() {
 		err = cmd.Wait()
+		_ = l.Close()
 		s.processEnded(req, info, err)
 	}()
 	return nil

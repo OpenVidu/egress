@@ -155,6 +155,18 @@ func (r *Runner) testSegments(t *testing.T) {
 				},
 				contentCheck: r.audioOnlyContentCheck,
 			},
+
+			// --------- Web V2 --------
+
+			{
+				name:        "WebV2",
+				requestType: types.RequestTypeWeb,
+				segmentOptions: &segmentOptions{
+					prefix:   "webv2_{time}",
+					playlist: "webv2_{time}.m3u8",
+				},
+				v2OutputOptions: &v2OutputOptions{},
+			},
 		} {
 			if !r.run(t, test, r.runSegmentsTest) {
 				return
@@ -164,7 +176,7 @@ func (r *Runner) testSegments(t *testing.T) {
 }
 
 func (r *Runner) runSegmentsTest(t *testing.T, test *testCase) {
-	req := r.build(test)
+	req := r.buildRequest(test)
 
 	egressID := r.startEgress(t, req)
 
@@ -259,7 +271,7 @@ func (r *Runner) verifySegmentOutput(
 	verifyPlaylistProgramDateTime(t, filenameSuffix, localPlaylistPath, pl.playlistType)
 
 	// verify
-	info := verify(t, localPlaylistPath, p, res, types.EgressTypeSegments, r.Muting, r.sourceFramerate, pl.playlistType == m3u8.PlaylistTypeLive)
+	info := verify(t, localPlaylistPath, p, res, types.EgressTypeSegments, r.sourceFramerate, pl.playlistType == m3u8.PlaylistTypeLive)
 	if tc.contentCheck != nil && info != nil {
 		tc.contentCheck(t, localPlaylistPath, info)
 	}

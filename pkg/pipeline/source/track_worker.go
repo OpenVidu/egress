@@ -314,7 +314,6 @@ func (s *SDKSource) handleSubscribe(w *trackWorker, trackID string, state *worke
 		s.callbacks.OnTrackAdded(ts)
 	}
 
-	writer.MarkAddedToPipeline()
 	return writer
 }
 
@@ -347,12 +346,9 @@ func (s *SDKSource) processIdleOp(w *trackWorker, trackID string, state *workerS
 
 	case OpPlaying:
 		logger.Warnw("invalid op in IDLE", nil, "trackID", trackID, "op", op.Type.String(), "generation", op.Generation)
-	case OpSetTimeProvider:
-		logger.Warnw("invalid op in IDLE", nil, "trackID", trackID, "op", op.Type.String())
 	case OpClose:
-		logger.Warnw("invalid op in IDLE", nil, "trackID", trackID, "op", op.Type.String())
 		return true
-	case OpUnsubscribe, OpFinished:
+	case OpSetTimeProvider, OpUnsubscribe, OpFinished:
 		logger.Warnw("invalid op in IDLE", nil, "trackID", trackID, "op", op.Type.String())
 	}
 	return false
@@ -428,7 +424,9 @@ func (s *SDKSource) doCleanup(trackID string, state *workerState) {
 	// Blocking cleanup - only affects this track's worker
 	active := s.active.Dec()
 	shouldContinue := s.RequestType == types.RequestTypeParticipant ||
-		s.RequestType == types.RequestTypeRoomComposite
+		s.RequestType == types.RequestTypeRoomComposite ||
+		s.RequestType == types.RequestTypeTemplate ||
+		s.RequestType == types.RequestTypeMedia
 
 	if shouldContinue {
 		trackKind := writer.TrackKind()
@@ -471,6 +469,14 @@ func (s *SDKSource) createWriterForOp(op Operation) (*sdk.AppWriter, *config.Tra
 		PayloadType:     track.Codec().PayloadType,
 		ClockRate:       track.Codec().ClockRate,
 	}
+
+	// Set audio channel from route match (RequestTypeMedia)
+	s.mu.Lock()
+	if ch, ok := s.audioChannels[pub.SID()]; ok {
+		ts.AudioChannel = &ch
+	}
+	s.mu.Unlock()
+
 	ts.AppSrc = app.SrcFromElement(src)
 
 	var tc sdk.DriftHandler
