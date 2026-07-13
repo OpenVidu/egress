@@ -26,7 +26,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"go.uber.org/atomic"
 
-	"github.com/livekit/protocol/livekit"
+	"github.com/livekit/protocol/egress"
 	"github.com/livekit/protocol/logger"
 	"github.com/livekit/protocol/rpc"
 	"github.com/livekit/protocol/utils/hwstats"
@@ -42,6 +42,7 @@ const (
 	cpuHoldDuration         = time.Second * 15
 	defaultKillThreshold    = 0.95
 	minKillDuration         = 10
+	lowCPUResetDuration     = 5
 	gb                      = 1024.0 * 1024.0 * 1024.0
 	pulseClientHold         = 4
 	memoryHeadroomGB        = 1.0
@@ -52,10 +53,12 @@ type Service interface {
 	IsIdle() bool
 	IsDisabled() bool
 	IsTerminating() bool
-	KillProcess(string, error)
+	StopProcess(egressID string, reason string)
+	KillProcess(egressID string, reason string, err error)
 }
 
 type Monitor struct {
+<<<<<<< HEAD
 
 	// BEGIN OPENVIDU BLOCK
 	disableCpuOverloadKiller bool
@@ -67,13 +70,22 @@ type Monitor struct {
 	nodeID        string
 	clusterID     string
 	cpuCostConfig *config.CPUCostConfig
+=======
+	nodeID             string
+	clusterID          string
+	cpuCostConfig      *config.CPUCostConfig
+	pulseSinkReapGrace atomic.Duration
+>>>>>>> upstream/main
 
 	promCPULoad           prometheus.Gauge
 	promCgroupMemory      prometheus.Gauge
 	promCgroupReadSuccess prometheus.Gauge
 	promProcRSS           prometheus.Gauge
 	promWouldRejectCgroup prometheus.Gauge
+	promPulseSinks        prometheus.Gauge
 	requestGauge          *prometheus.GaugeVec
+	handlerResults        *prometheus.CounterVec
+	promLoadRatio         *prometheus.GaugeVec
 
 	svc                 Service
 	cpuStats            *hwstats.CPUStats
@@ -83,20 +95,25 @@ type Monitor struct {
 	pendingPulseClients atomic.Int32
 	pendingMemoryUsage  atomic.Float64
 
-	mu                deadlock.Mutex
-	highCPUDuration   int
-	highMemoryStart   time.Time
-	lastMemoryDump    time.Time
-	pending           map[string]*processStats
-	procStats         map[int]*processStats
-	memoryUsage       float64
-	cgroupUsageBytes  uint64
-	cgroupOK          bool
-	cgroupErrorLogged atomic.Bool
+	mu                 deadlock.Mutex
+	highCPUDuration    int
+	lowCPUDuration     int
+	cpuStopRequestedAt time.Time
+	cpuStopEgressID    string
+	highMemoryStart    time.Time
+	lastMemoryDump     time.Time
+	pending            map[string]*processStats
+	procStats          map[int]*processStats
+	memoryUsage        float64
+	cgroupUsageBytes   uint64
+	cgroupOK           bool
+	cgroupErrorLogged  atomic.Bool
+	pulseErrorLogged   atomic.Bool
 }
 
 type processStats struct {
-	egressID string
+	egressID    string
+	requestType string
 
 	pendingCPU float64
 	lastCPU    float64
@@ -128,6 +145,9 @@ func NewMonitor(conf *config.ServiceConfig, svc Service) (*Monitor, error) {
 	}
 
 	m.initPrometheus()
+
+	m.SetPulseSinkReapGraceSec(conf.PulseSinkReapGraceSec)
+	go m.runPulseSinkReaper()
 
 	procStats, err := hwstats.NewProcMonitor(m.updateEgressStats)
 	if err != nil {
@@ -253,6 +273,42 @@ func (m *Monitor) canAcceptRequestLocked(req *rpc.StartEgressRequest) ([]interfa
 	// END OPENVIDU BLOCK
 
 	required := req.EstimatedCpu
+
+	setRequired := func(request egress.EgressRequest) bool {
+		if template := request.GetTemplate(); template != nil {
+			useSDK := config.ShouldUseSDKSource(template)
+			if !useSDK && !m.canAcceptWebLocked() {
+				fields = append(fields, "canAccept", false, "reason", "pulse clients")
+				return false
+			}
+			if required == 0 {
+				if template.AudioOnly {
+					required = m.cpuCostConfig.AudioRoomCompositeCpuCost
+				} else {
+					required = m.cpuCostConfig.RoomCompositeCpuCost
+				}
+			}
+		} else if web := request.GetWeb(); web != nil {
+			if !m.canAcceptWebLocked() {
+				fields = append(fields, "canAccept", false, "reason", "pulse clients")
+				return false
+			}
+			if required == 0 {
+				if web.AudioOnly {
+					required = m.cpuCostConfig.AudioWebCpuCost
+				} else {
+					required = m.cpuCostConfig.WebCpuCost
+				}
+			}
+		} else if media := request.GetMedia(); media != nil {
+			if required == 0 {
+				required = m.cpuCostConfig.ParticipantCpuCost
+				return true
+			}
+		}
+		return false
+	}
+
 	switch r := req.Request.(type) {
 	case *rpc.StartEgressRequest_RoomComposite:
 		useSDK := config.ShouldUseSDKSource(r.RoomComposite)
@@ -292,38 +348,9 @@ func (m *Monitor) canAcceptRequestLocked(req *rpc.StartEgressRequest) ([]interfa
 			required = m.cpuCostConfig.TrackCpuCost
 		}
 	case *rpc.StartEgressRequest_Replay:
-		replayReq := r.Replay
-		switch source := replayReq.Source.(type) {
-		case *livekit.ExportReplayRequest_Template:
-			useSDK := config.ShouldUseSDKSource(source.Template)
-			if !useSDK && !m.canAcceptWebLocked() {
-				fields = append(fields, "canAccept", false, "reason", "pulse clients")
-				return fields, false
-			}
-			if required == 0 {
-				if source.Template.AudioOnly {
-					required = m.cpuCostConfig.AudioRoomCompositeCpuCost
-				} else {
-					required = m.cpuCostConfig.RoomCompositeCpuCost
-				}
-			}
-		case *livekit.ExportReplayRequest_Web:
-			if !m.canAcceptWebLocked() {
-				fields = append(fields, "canAccept", false, "reason", "pulse clients")
-				return fields, false
-			}
-			if required == 0 {
-				if source.Web.AudioOnly {
-					required = m.cpuCostConfig.AudioWebCpuCost
-				} else {
-					required = m.cpuCostConfig.WebCpuCost
-				}
-			}
-		case *livekit.ExportReplayRequest_Media:
-			if required == 0 {
-				required = m.cpuCostConfig.ParticipantCpuCost
-			}
-		}
+		setRequired(r.Replay)
+	case *rpc.StartEgressRequest_Egress:
+		setRequired(r.Egress)
 	}
 
 	accept := available >= required
@@ -407,6 +434,33 @@ func (m *Monitor) AcceptRequest(req *rpc.StartEgressRequest) error {
 	var pulseClients int32
 	var countedAsWeb bool
 
+	setCPUHold := func(request egress.EgressRequest) {
+		if template := request.GetTemplate(); template != nil {
+			useSDK := config.ShouldUseSDKSource(template)
+			if !useSDK {
+				m.webRequests.Inc()
+				countedAsWeb = true
+				pulseClients = pulseClientHold
+			}
+			if template.AudioOnly {
+				cpuHold = m.cpuCostConfig.AudioRoomCompositeCpuCost
+			} else {
+				cpuHold = m.cpuCostConfig.RoomCompositeCpuCost
+			}
+		} else if web := request.GetWeb(); web != nil {
+			pulseClients = pulseClientHold
+			m.webRequests.Inc()
+			countedAsWeb = true
+			if web.AudioOnly {
+				cpuHold = m.cpuCostConfig.AudioWebCpuCost
+			} else {
+				cpuHold = m.cpuCostConfig.WebCpuCost
+			}
+		} else if request.GetMedia() != nil {
+			cpuHold = m.cpuCostConfig.ParticipantCpuCost
+		}
+	}
+
 	switch r := req.Request.(type) {
 	case *rpc.StartEgressRequest_RoomComposite:
 		useSDK := config.ShouldUseSDKSource(r.RoomComposite)
@@ -436,36 +490,15 @@ func (m *Monitor) AcceptRequest(req *rpc.StartEgressRequest) error {
 	case *rpc.StartEgressRequest_Track:
 		cpuHold = m.cpuCostConfig.TrackCpuCost
 	case *rpc.StartEgressRequest_Replay:
-		replayReq := r.Replay
-		switch source := replayReq.Source.(type) {
-		case *livekit.ExportReplayRequest_Template:
-			useSDK := config.ShouldUseSDKSource(source.Template)
-			if !useSDK {
-				m.webRequests.Inc()
-				countedAsWeb = true
-				pulseClients = pulseClientHold
-			}
-			if source.Template.AudioOnly {
-				cpuHold = m.cpuCostConfig.AudioRoomCompositeCpuCost
-			} else {
-				cpuHold = m.cpuCostConfig.RoomCompositeCpuCost
-			}
-		case *livekit.ExportReplayRequest_Web:
-			pulseClients = pulseClientHold
-			m.webRequests.Inc()
-			countedAsWeb = true
-			if source.Web.AudioOnly {
-				cpuHold = m.cpuCostConfig.AudioWebCpuCost
-			} else {
-				cpuHold = m.cpuCostConfig.WebCpuCost
-			}
-		case *livekit.ExportReplayRequest_Media:
-			cpuHold = m.cpuCostConfig.ParticipantCpuCost
-		}
+		setCPUHold(r.Replay)
+	case *rpc.StartEgressRequest_Egress:
+		setCPUHold(r.Egress)
 	}
 
+	reqType := requestTypeFromReq(req)
 	ps := &processStats{
 		egressID:     req.EgressId,
+		requestType:  reqType,
 		pendingCPU:   cpuHold,
 		allowedCPU:   cpuHold,
 		countedAsWeb: countedAsWeb,
@@ -512,7 +545,7 @@ func (m *Monitor) UpdatePID(egressID string, pid int) {
 }
 
 func (m *Monitor) EgressStarted(req *rpc.StartEgressRequest) {
-	switch req.Request.(type) {
+	switch r := req.Request.(type) {
 	case *rpc.StartEgressRequest_RoomComposite:
 		m.requestGauge.With(prometheus.Labels{"type": types.RequestTypeRoomComposite}).Add(1)
 	case *rpc.StartEgressRequest_Web:
@@ -524,15 +557,20 @@ func (m *Monitor) EgressStarted(req *rpc.StartEgressRequest) {
 	case *rpc.StartEgressRequest_Track:
 		m.requestGauge.With(prometheus.Labels{"type": types.RequestTypeTrack}).Add(1)
 	case *rpc.StartEgressRequest_Replay:
-		replayReq := req.Request.(*rpc.StartEgressRequest_Replay).Replay
-		switch replayReq.Source.(type) {
-		case *livekit.ExportReplayRequest_Template:
-			m.requestGauge.With(prometheus.Labels{"type": types.RequestTypeTemplate}).Add(1)
-		case *livekit.ExportReplayRequest_Web:
-			m.requestGauge.With(prometheus.Labels{"type": types.RequestTypeWeb}).Add(1)
-		case *livekit.ExportReplayRequest_Media:
-			m.requestGauge.With(prometheus.Labels{"type": types.RequestTypeMedia}).Add(1)
-		}
+		m.egressStarted(r.Replay)
+	case *rpc.StartEgressRequest_Egress:
+		m.egressStarted(r.Egress)
+	}
+}
+
+func (m *Monitor) egressStarted(request egress.EgressRequest) {
+	switch {
+	case request.GetTemplate() != nil:
+		m.requestGauge.With(prometheus.Labels{"type": types.RequestTypeTemplate}).Add(1)
+	case request.GetWeb() != nil:
+		m.requestGauge.With(prometheus.Labels{"type": types.RequestTypeWeb}).Add(1)
+	case request.GetMedia() != nil:
+		m.requestGauge.With(prometheus.Labels{"type": types.RequestTypeMedia}).Add(1)
 	}
 }
 
@@ -544,7 +582,7 @@ func (m *Monitor) EgressAborted(req *rpc.StartEgressRequest) {
 	delete(m.pending, req.EgressId)
 	m.requests.Dec()
 	switch req.Request.(type) {
-	case *rpc.StartEgressRequest_RoomComposite, *rpc.StartEgressRequest_Web, *rpc.StartEgressRequest_Replay:
+	case *rpc.StartEgressRequest_RoomComposite, *rpc.StartEgressRequest_Web, *rpc.StartEgressRequest_Replay, *rpc.StartEgressRequest_Egress:
 		if ps != nil && ps.countedAsWeb {
 			m.webRequests.Dec()
 		}
@@ -554,6 +592,11 @@ func (m *Monitor) EgressAborted(req *rpc.StartEgressRequest) {
 func (m *Monitor) EgressEnded(req *rpc.StartEgressRequest) (float64, float64, int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	if m.cpuStopEgressID == req.EgressId {
+		m.cpuStopRequestedAt = time.Time{}
+		m.cpuStopEgressID = ""
+	}
 
 	var countedAsWeb bool
 	if ps := m.pending[req.EgressId]; ps != nil {
@@ -567,7 +610,7 @@ func (m *Monitor) EgressEnded(req *rpc.StartEgressRequest) (float64, float64, in
 		}
 	}
 
-	switch req.Request.(type) {
+	switch r := req.Request.(type) {
 	case *rpc.StartEgressRequest_RoomComposite:
 		m.requestGauge.With(prometheus.Labels{"type": types.RequestTypeRoomComposite}).Sub(1)
 		if countedAsWeb {
@@ -583,19 +626,9 @@ func (m *Monitor) EgressEnded(req *rpc.StartEgressRequest) (float64, float64, in
 	case *rpc.StartEgressRequest_Track:
 		m.requestGauge.With(prometheus.Labels{"type": types.RequestTypeTrack}).Sub(1)
 	case *rpc.StartEgressRequest_Replay:
-		replayReq := req.Request.(*rpc.StartEgressRequest_Replay).Replay
-		switch replayReq.Source.(type) {
-		case *livekit.ExportReplayRequest_Template:
-			m.requestGauge.With(prometheus.Labels{"type": types.RequestTypeTemplate}).Sub(1)
-			if countedAsWeb {
-				m.webRequests.Dec()
-			}
-		case *livekit.ExportReplayRequest_Web:
-			m.requestGauge.With(prometheus.Labels{"type": types.RequestTypeWeb}).Sub(1)
-			m.webRequests.Dec()
-		case *livekit.ExportReplayRequest_Media:
-			m.requestGauge.With(prometheus.Labels{"type": types.RequestTypeMedia}).Sub(1)
-		}
+		m.egressEnded(r.Replay, countedAsWeb)
+	case *rpc.StartEgressRequest_Egress:
+		m.egressEnded(r.Egress, countedAsWeb)
 	}
 
 	delete(m.pending, req.EgressId)
@@ -609,6 +642,21 @@ func (m *Monitor) EgressEnded(req *rpc.StartEgressRequest) (float64, float64, in
 	}
 
 	return 0, 0, 0
+}
+
+func (m *Monitor) egressEnded(request egress.EgressRequest, countedAsWeb bool) {
+	switch {
+	case request.GetTemplate() != nil:
+		m.requestGauge.With(prometheus.Labels{"type": types.RequestTypeTemplate}).Sub(1)
+		if countedAsWeb {
+			m.webRequests.Dec()
+		}
+	case request.GetWeb() != nil:
+		m.requestGauge.With(prometheus.Labels{"type": types.RequestTypeWeb}).Sub(1)
+		m.webRequests.Dec()
+	case request.GetMedia() != nil:
+		m.requestGauge.With(prometheus.Labels{"type": types.RequestTypeMedia}).Sub(1)
+	}
 }
 
 func (m *Monitor) GetAvailableCPU() float64 {
@@ -711,6 +759,7 @@ func (m *Monitor) updateEgressStats(stats *hwstats.ProcStats) {
 		}
 	}
 
+<<<<<<< HEAD
 	cpuKillThreshold := defaultKillThreshold
 	if cpuKillThreshold <= m.cpuCostConfig.MaxCpuUtilization {
 		cpuKillThreshold = (1 + m.cpuCostConfig.MaxCpuUtilization) / 2
@@ -737,6 +786,9 @@ func (m *Monitor) updateEgressStats(stats *hwstats.ProcStats) {
 			}
 		}
 	}
+=======
+	m.checkCPUKill(load, maxCPU, maxCPUEgress)
+>>>>>>> upstream/main
 
 	totalMemory := 0
 	maxMemory := 0
@@ -768,6 +820,8 @@ func (m *Monitor) updateEgressStats(stats *hwstats.ProcStats) {
 	m.updateCgroupStats()
 
 	m.updateWouldRejectMetrics()
+
+	m.updateLoadRatios(load)
 
 	m.checkMemoryKill(maxMemoryEgress, maxMemoryGroup)
 }
@@ -840,6 +894,86 @@ func (m *Monitor) updateWouldRejectMetrics() {
 	}
 }
 
+// updateLoadRatios updates the per-resource utilization ratios (0 = idle, can exceed 1 under overload).
+// Called from updateEgressStats after CPU, memory, and cgroup stats are already computed.
+func (m *Monitor) updateLoadRatios(cpuLoad float64) {
+	// CPU ratio: actual CPU utilization / configured limit (same approach as SFU)
+	if m.cpuCostConfig.MaxCpuUtilization > 0 {
+		m.promLoadRatio.WithLabelValues("cpu").Set(cpuLoad / m.cpuCostConfig.MaxCpuUtilization)
+	}
+
+	if m.cpuCostConfig.MaxMemory > 0 {
+		if m.cpuCostConfig.MemorySource == config.MemorySourceCgroup && m.cgroupOK {
+			m.promLoadRatio.WithLabelValues("memory").Set(float64(m.cgroupUsageBytes) / gb / m.cpuCostConfig.MaxMemory)
+		} else {
+			m.promLoadRatio.WithLabelValues("memory").Set(m.memoryUsage / m.cpuCostConfig.MaxMemory)
+		}
+	}
+
+	// PulseAudio ratio
+	if m.cpuCostConfig.MaxPulseClients > 0 {
+		if clients, err := pulse.Clients(); err == nil {
+			m.pulseErrorLogged.Store(false)
+			m.promLoadRatio.WithLabelValues("pulse").Set(float64(clients) / float64(m.cpuCostConfig.MaxPulseClients))
+		} else if m.pulseErrorLogged.CompareAndSwap(false, true) {
+			logger.Warnw("failed to read PulseAudio clients", err)
+		}
+	}
+}
+
+// checkCPUKill stages a graceful EOS drain on sustained high CPU and escalates to a hard kill if the grace period elapses; the accumulator only clears after lowCPUResetDuration consecutive sub-threshold ticks so jittery loads still trip while transient spikes don't pile up.
+func (m *Monitor) checkCPUKill(load, maxCPU float64, maxCPUEgress string) {
+	cpuKillThreshold := defaultKillThreshold
+	if cpuKillThreshold <= m.cpuCostConfig.MaxCpuUtilization {
+		cpuKillThreshold = (1 + m.cpuCostConfig.MaxCpuUtilization) / 2
+	}
+
+	if load <= cpuKillThreshold {
+		m.lowCPUDuration++
+		if m.lowCPUDuration >= lowCPUResetDuration {
+			m.highCPUDuration = 0
+		}
+		return
+	}
+	m.lowCPUDuration = 0
+
+	logger.Warnw("high cpu usage", nil,
+		"cpu", load,
+		"requests", m.requests.Load(),
+	)
+
+	if m.requests.Load() <= 1 {
+		return
+	}
+
+	if m.cpuStopRequestedAt.IsZero() {
+		m.highCPUDuration++
+		if m.highCPUDuration < minKillDuration || maxCPUEgress == "" {
+			return
+		}
+		m.svc.StopProcess(maxCPUEgress, ResultStoppedCPU)
+		m.cpuStopRequestedAt = time.Now()
+		m.cpuStopEgressID = maxCPUEgress
+		m.highCPUDuration = 0
+		logger.Warnw("requested graceful stop for high cpu", nil,
+			"egressID", maxCPUEgress,
+			"cpu", maxCPU,
+		)
+		return
+	}
+
+	if time.Since(m.cpuStopRequestedAt) < time.Duration(m.cpuCostConfig.CpuKillGraceSec)*time.Second {
+		return
+	}
+	logger.Warnw("graceful stop grace period exceeded, killing", nil,
+		"egressID", m.cpuStopEgressID,
+		"cpu", maxCPU,
+	)
+	m.svc.KillProcess(m.cpuStopEgressID, ResultKilledCPU, errors.ErrCPUExhausted(maxCPU))
+	m.cpuStopRequestedAt = time.Time{}
+	m.cpuStopEgressID = ""
+}
+
 // checkMemoryKill evaluates whether to kill a process based on memory usage.
 func (m *Monitor) checkMemoryKill(maxMemoryEgress string, maxMemoryGroup *hwstats.GroupMemory) {
 	if m.cpuCostConfig.MaxMemory == 0 {
@@ -875,7 +1009,7 @@ func (m *Monitor) checkMemoryKill(maxMemoryEgress string, maxMemoryGroup *hwstat
 					"egressID", maxMemoryEgress, "processes", maxMemoryGroup.Procs)
 			}
 			// Report the actual memory that triggered the kill, not per-process max
-			m.svc.KillProcess(maxMemoryEgress, errors.ErrOOM(killTriggerGB))
+			m.svc.KillProcess(maxMemoryEgress, ResultKilledOOM, errors.ErrOOM(killTriggerGB))
 			m.highMemoryStart = time.Time{}
 		}
 	} else {

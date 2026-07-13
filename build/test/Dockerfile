@@ -15,7 +15,7 @@
 # syntax=docker/dockerfile:1.6
 ARG TARGETPLATFORM
 ARG TEMPLATE_TAG=latest
-ARG GO_VERSION=1.26.1
+ARG GO_VERSION=1.26.2
 ARG LINT_VERSION=v2.11.3
 
 FROM livekit/egress-templates:$TEMPLATE_TAG AS template
@@ -126,20 +126,23 @@ RUN if [ "$TARGETPLATFORM" = "linux/arm64" ]; then ARCH=arm64v8; else ARCH=amd64
     sed -i 's_record: no_record: yes_g' mediamtx.yml && \
     sed -i 's_recordPath: ./recordings/%path/_recordPath: /out/output/stream-_g' mediamtx.yml
 
+# install toxiproxy (used by integration tests to simulate wedged RTMP outputs)
+RUN if [ "$TARGETPLATFORM" = "linux/arm64" ]; then ARCH=arm64; else ARCH=amd64; fi && \
+    wget -O /usr/local/bin/toxiproxy-server \
+        https://github.com/Shopify/toxiproxy/releases/download/v2.12.0/toxiproxy-server-linux-${ARCH} && \
+    chmod +x /usr/local/bin/toxiproxy-server
+
 # create egress user
 RUN useradd -ms /bin/bash -g root -G sudo,pulse,pulse-access egress
 RUN mkdir -p home/egress/tmp home/egress/.cache/xdgr && \
     chown -R egress /home/egress
+RUN mkdir -p /out/output && chown -R egress /out
 
 # copy files
-COPY test/agents/requirements.txt /agents/requirements.txt
-RUN pip install --break-system-packages --no-cache-dir -r /agents/requirements.txt
-
 COPY test/ /workspace/test/
 COPY --from=1 /workspace/egress /bin/
 COPY --from=1 /workspace/test.test .
 COPY media-samples /media-samples
-COPY --from=1 /workspace/test/agents /agents
 COPY build/test/entrypoint.sh .
 
 # Force lint stage to run successfully

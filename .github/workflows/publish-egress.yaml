@@ -23,11 +23,11 @@ on:
       - 'v*.*.*'
 jobs:
   docker:
-    runs-on: namespace-profile-8vcpu-cache
+    runs-on: ubuntu-latest-m
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
-      - uses: actions/cache@v5
+      - uses: actions/cache@v6
         with:
           path: |
             ~/go/pkg/mod
@@ -48,7 +48,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
-          go-version: 1.26.1
+          go-version: 1.26.2
 
       - name: Download Go modules
         run: go mod download

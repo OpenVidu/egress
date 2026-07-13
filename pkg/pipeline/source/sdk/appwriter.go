@@ -92,12 +92,11 @@ type AppWriter struct {
 	pliThrottle core.Throttle
 
 	// a/v sync
-	synchronizer *synchronizer.Synchronizer
-	*synchronizer.TrackSynchronizer
+	sync         synchronizer.Sync
+	trackSync    synchronizer.TrackSync
 	driftHandler DriftHandler
 
 	lastPTS              time.Duration
-	lastDrift            time.Duration
 	lastPipelineCheckPTS time.Duration
 	initialized          bool
 
@@ -134,7 +133,7 @@ type appWriterStats struct {
 }
 
 type DriftHandler interface {
-	EnqueueDrift(t time.Duration)
+	SetDrift(t time.Duration)
 	Processed() time.Duration
 }
 
@@ -144,23 +143,23 @@ func NewAppWriter(
 	pub lksdk.TrackPublication,
 	rp *lksdk.RemoteParticipant,
 	ts *config.TrackSource,
-	synchronizer *synchronizer.Synchronizer,
+	syncEngine synchronizer.Sync,
 	driftHandler DriftHandler,
 	callbacks *gstreamer.Callbacks,
 ) (*AppWriter, error) {
 	w := &AppWriter{
-		conf:              conf,
-		logger:            logger.GetLogger().WithValues("trackID", track.ID(), "kind", track.Kind().String()),
-		track:             track,
-		pub:               pub,
-		codec:             ts.MimeType,
-		src:               ts.AppSrc,
-		trackSource:       ts,
-		callbacks:         callbacks,
-		synchronizer:      synchronizer,
-		TrackSynchronizer: synchronizer.AddTrack(track, rp.Identity()),
-		driftHandler:      driftHandler,
-		timeProvider:      gstreamer.NopTimeProvider(),
+		conf:         conf,
+		logger:       logger.GetLogger().WithValues("trackID", track.ID(), "kind", track.Kind().String()),
+		track:        track,
+		pub:          pub,
+		codec:        ts.MimeType,
+		src:          ts.AppSrc,
+		trackSource:  ts,
+		callbacks:    callbacks,
+		sync:         syncEngine,
+		trackSync:    syncEngine.AddTrack(track, rp.SID()),
+		driftHandler: driftHandler,
+		timeProvider: gstreamer.NopTimeProvider(),
 	}
 	w.samplesCond = sync.NewCond(&w.samplesLock)
 
@@ -172,17 +171,20 @@ func NewAppWriter(
 			logger.Errorw("failed to create csv logger", err)
 		} else {
 			w.csvLogger = csvLogger
-			w.OnSenderReport(func(drift time.Duration) {
-				logger.Debugw("received sender report", "drift", drift)
-				if w.driftHandler != nil {
-					// presence of the drift handler means that PTS updates on SRs are disabled
-					d := drift - w.lastDrift
-					w.lastDrift = drift
-					w.driftHandler.EnqueueDrift(d)
-				}
-				w.updateDrift(drift)
-			})
 		}
+	}
+
+	// Wire OnSenderReport whenever any consumer needs it: the sync engine, the
+	// tempo controller's drift handler, or track logging. Registering it
+	// unconditionally for the legacy synchronizer is what routes drift to the
+	// tempo controller instead of letting the synchronizer rebase audio PTS.
+	if conf.EnableSyncEngine || w.driftHandler != nil || w.csvLogger != nil {
+		w.trackSync.OnSenderReport(func(drift time.Duration) {
+			if w.driftHandler != nil {
+				w.driftHandler.SetDrift(drift)
+			}
+			w.updateDrift(drift)
+		})
 	}
 
 	var depacketizer rtp.Depacketizer
@@ -213,6 +215,9 @@ func NewAppWriter(
 
 	opts := []jitter.Option{jitter.WithLogger(w.logger)}
 
+	// Audio tracks have no keyframe concept; sendPLI is a no-op for them so
+	// every call site can invoke it unconditionally.
+	w.sendPLI = func() {}
 	if track.Kind() == webrtc.RTPCodecTypeVideo {
 		w.pliThrottle = core.NewThrottle(time.Second)
 		w.sendPLI = func() { w.pliThrottle(func() { rp.WritePLI(track.SSRC()) }) }
@@ -299,14 +304,13 @@ func (w *AppWriter) readNext() {
 	receivedAt := time.Now()
 	var packets []jitter.ExtPacket
 	if !w.initialized {
-		ready, dropped, done := w.PrimeForStart(jitter.ExtPacket{ReceivedAt: receivedAt, Packet: pkt})
+		ready, dropped, done := w.trackSync.PrimeForStart(jitter.ExtPacket{ReceivedAt: receivedAt, Packet: pkt})
 		if dropped > 0 {
 			w.stats.packetsDropped.Add(uint64(dropped))
-			if w.sendPLI != nil {
-				w.sendPLI()
-			}
+			w.sendPLI()
 		}
-		if !done {
+		if !done || len(ready) == 0 {
+			// done with no packets means the track was closed during priming
 			return
 		}
 		w.initialized = true
@@ -322,9 +326,7 @@ func (w *AppWriter) readNext() {
 		if w.buildReady.IsBroken() {
 			w.callbacks.OnTrackUnmuted(w.track.ID())
 		}
-		if w.sendPLI != nil {
-			w.sendPLI()
-		}
+		w.sendPLI()
 	}
 	if len(packets) > 0 {
 		w.buffer.PushExtPacketBatch(packets)
@@ -442,7 +444,7 @@ func (w *AppWriter) logTrackState(event string) {
 }
 
 func (w *AppWriter) onKeyframeRequired() {
-	if w.finished.IsBroken() || w.sendPLI == nil {
+	if w.finished.IsBroken() {
 		return
 	}
 	w.sendPLI()
@@ -467,6 +469,7 @@ func (w *AppWriter) onPacket(sample []jitter.ExtPacket) {
 		w.samplesLen++
 	}
 	// drop old samples if queue is overflowing
+	dropped := false
 	for w.samplesLen > cSamplesQueueDepth {
 		if w.samplesHead != nil {
 			itemToDrop := w.samplesHead
@@ -474,6 +477,7 @@ func (w *AppWriter) onPacket(sample []jitter.ExtPacket) {
 			w.samplesLen--
 			w.stats.packetsDropped.Add(uint64(len(itemToDrop.sample)))
 			w.logger.Warnw("buffer full, dropping sample", nil, "numPackets", len(itemToDrop.sample))
+			dropped = true
 		}
 		if w.samplesHead == nil {
 			w.samplesTail = nil
@@ -482,6 +486,10 @@ func (w *AppWriter) onPacket(sample []jitter.ExtPacket) {
 	}
 	w.samplesCond.Broadcast()
 	w.samplesLock.Unlock()
+
+	if dropped {
+		w.sendPLI()
+	}
 }
 
 func (w *AppWriter) pushSamples() {
@@ -540,9 +548,10 @@ func (w *AppWriter) pushPacket(pkt jitter.ExtPacket) error {
 	w.translator.Translate(pkt.Packet)
 
 	// get PTS
-	pts, err := w.GetPTS(pkt)
+	pts, err := w.trackSync.GetPTS(pkt)
 	if err != nil {
 		w.stats.packetsDropped.Inc()
+		w.sendPLI()
 		return err
 	}
 
@@ -550,6 +559,7 @@ func (w *AppWriter) pushPacket(pkt jitter.ExtPacket) error {
 		// TODO: handle it by sending new gst segment that will reflect the offset
 		w.logger.Debugw("negative packet pts, dropping", "pts", pts)
 		w.stats.packetsDropped.Inc()
+		w.sendPLI()
 		return nil
 	}
 
@@ -557,6 +567,7 @@ func (w *AppWriter) pushPacket(pkt jitter.ExtPacket) error {
 	if err != nil {
 		w.stats.packetsDropped.Inc()
 		w.logger.Errorw("could not marshal packet", err)
+		w.sendPLI()
 		return err
 	}
 
@@ -580,6 +591,7 @@ func (w *AppWriter) pushPacket(pkt jitter.ExtPacket) error {
 
 	if flow := w.src.PushBuffer(b); flow != gst.FlowOK {
 		w.stats.packetsDropped.Inc()
+		w.sendPLI()
 		if flow == gst.FlowFlushing {
 			w.flushingCount++
 			if w.flushingCount == 1 {
@@ -703,7 +715,7 @@ func (w *AppWriter) Drain(force bool) {
 
 	<-w.finished.Watch()
 	w.logger.Debugw("finished fuse broken")
-	w.synchronizer.RemoveTrack(w.track.ID())
+	w.sync.RemoveTrack(w.track.ID())
 }
 
 // OnUnsubscribed signals that the track was unsubscribed but allows the reader

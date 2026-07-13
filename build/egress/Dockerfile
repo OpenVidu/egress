@@ -26,9 +26,9 @@ ENV TARGETPLATFORM=${TARGETPLATFORM}
 WORKDIR /workspace
 
 # install go
-RUN wget https://go.dev/dl/go1.26.1.linux-${TARGETARCH}.tar.gz && \
+RUN wget https://go.dev/dl/go1.26.2.linux-${TARGETARCH}.tar.gz && \
     rm -rf /usr/local/go && \
-    tar -C /usr/local -xzf go1.26.1.linux-${TARGETARCH}.tar.gz
+    tar -C /usr/local -xzf go1.26.2.linux-${TARGETARCH}.tar.gz
 ENV PATH="/usr/local/go/bin:${PATH}"
 
 # download go modules
@@ -96,9 +96,14 @@ COPY --from=1 /workspace/egress /bin/
 COPY --from=1 /tini /tini
 COPY build/egress/entrypoint.sh /
 
+# PulseAudio defaults to rlimit-nofile=256. Set it to a more sensible value to avoid
+# hitting a max Chrome instances bottleneck
+RUN echo "rlimit-nofile = -1" >> /etc/pulse/daemon.conf
+
 # run
 USER egress
 ENV PATH=${PATH}:/chrome
 ENV XDG_RUNTIME_DIR=/home/egress/.cache/xdgr
 ENV CHROME_DEVEL_SANDBOX=/usr/local/sbin/chrome-devel-sandbox
+
 ENTRYPOINT ["/entrypoint.sh"]

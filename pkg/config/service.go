@@ -62,6 +62,10 @@ const (
 	defaultAudioTempoControllerAdjustmentRate = 0.05
 
 	defaultMaxPulseClients = 60
+
+	defaultCpuKillGraceSec = 30
+
+	defaultPulseSinkReapGraceSec = 30
 )
 
 type ServiceConfig struct {
@@ -71,6 +75,8 @@ type ServiceConfig struct {
 	TemplatePort     int `yaml:"template_port"`      // room composite template server port
 	PrometheusPort   int `yaml:"prometheus_port"`    // prometheus handler port
 	DebugHandlerPort int `yaml:"debug_handler_port"` // egress debug handler port
+
+	PulseSinkReapGraceSec int `yaml:"pulse_sink_reap_grace_sec"` // seconds a leaked pulse sink must stay orphaned before it is unloaded (0 = use default, negative = disable reaping)
 
 	*CPUCostConfig `yaml:"cpu_cost"` // CPU costs for the different egress types
 
@@ -105,6 +111,7 @@ type CPUCostConfig struct {
 	// Memory source configuration (cgroup-aware memory accounting)
 	MemorySource       MemorySource `yaml:"memory_source"`         // memory measurement source: proc_rss, cgroup
 	MemoryKillGraceSec int          `yaml:"memory_kill_grace_sec"` // grace period in update cycles before kill (0 = immediate)
+	CpuKillGraceSec    int          `yaml:"cpu_kill_grace_sec"`    // seconds to wait for a graceful EOS drain after sustained high CPU before hard kill (0 = use default)
 }
 
 func NewServiceConfig(confString string) (*ServiceConfig, error) {
@@ -141,7 +148,7 @@ func NewServiceConfig(confString string) (*ServiceConfig, error) {
 
 	rpc.InitPSRPCStats(prometheus.Labels{"node_id": conf.NodeID, "node_type": "EGRESS"})
 
-	if err := conf.initLogger("nodeID", conf.NodeID, "clusterID", conf.ClusterID); err != nil {
+	if err := conf.InitLogger("egress", "nodeID", conf.NodeID, "clusterID", conf.ClusterID); err != nil {
 		return nil, err
 	}
 
@@ -203,6 +210,12 @@ func (c *ServiceConfig) InitDefaults() {
 	}
 	if c.MaxPulseClients == 0 {
 		c.MaxPulseClients = defaultMaxPulseClients
+	}
+	if c.CpuKillGraceSec <= 0 {
+		c.CpuKillGraceSec = defaultCpuKillGraceSec
+	}
+	if c.PulseSinkReapGraceSec == 0 {
+		c.PulseSinkReapGraceSec = defaultPulseSinkReapGraceSec
 	}
 
 	// Memory source defaults to proc_rss (preserves existing behavior)

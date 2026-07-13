@@ -37,6 +37,7 @@ import (
 	"github.com/livekit/egress/pkg/config"
 	"github.com/livekit/egress/pkg/errors"
 	"github.com/livekit/egress/pkg/logging"
+	"github.com/livekit/egress/pkg/stats"
 )
 
 var (
@@ -71,11 +72,7 @@ func (s *Server) StartEgress(ctx context.Context, req *rpc.StartEgressRequest) (
 		return nil, err
 	}
 
-	var typesInput any = p.Info.Request
-	if e, ok := p.Info.Request.(*livekit.EgressInfo_Replay); ok {
-		typesInput = e.Replay
-	}
-	requestType, outputType := egress.GetTypes(typesInput)
+	requestType, outputType := egress.GetTypes(p.Info.Request)
 	logger.Infow("request validated",
 		"egressID", req.EgressId,
 		"requestType", requestType,
@@ -83,6 +80,7 @@ func (s *Server) StartEgress(ctx context.Context, req *rpc.StartEgressRequest) (
 		"outputType", outputType,
 		"room", p.Info.RoomName,
 		"request", p.Info.Request,
+		"syncEngine", p.EnableSyncEngine,
 	)
 
 	errChan := s.ioClient.CreateEgress(ctx, p.Info)
@@ -150,6 +148,7 @@ func (s *Server) launchProcess(req *rpc.StartEgressRequest, info *livekit.Egress
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 
 	if err = s.Launch(context.Background(), handlerID, req, info, cmd); err != nil {
+		_ = l.Close()
 		return err
 	}
 
@@ -157,6 +156,15 @@ func (s *Server) launchProcess(req *rpc.StartEgressRequest, info *livekit.Egress
 	go func() {
 		err = cmd.Wait()
 		_ = l.Close()
+
+		if reason := s.GetKillReason(info.EgressId); reason != "" {
+			s.monitor.HandlerResult(info.EgressId, reason)
+		} else if err != nil {
+			s.monitor.HandlerResult(info.EgressId, stats.ResultProcessError)
+		} else {
+			s.monitor.HandlerResult(info.EgressId, stats.ResultCompleted)
+		}
+
 		s.processEnded(req, info, err)
 	}()
 	return nil
@@ -192,6 +200,7 @@ func (s *Server) processEnded(req *rpc.StartEgressRequest, info *livekit.EgressI
 	tmpDir := path.Join(config.TmpDir, req.EgressId)
 	os.RemoveAll(tmpDir)
 
+	s.MergeInAccumulator(info.EgressId)
 	s.ProcessFinished(info.EgressId)
 	s.activeRequests.Dec()
 }
