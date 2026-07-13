@@ -58,7 +58,6 @@ type Service interface {
 }
 
 type Monitor struct {
-<<<<<<< HEAD
 
 	// BEGIN OPENVIDU BLOCK
 	disableCpuOverloadKiller bool
@@ -67,15 +66,10 @@ type Monitor struct {
 	minDiskSpaceMB           float64
 	// END OPENVIDU BLOCK
 
-	nodeID        string
-	clusterID     string
-	cpuCostConfig *config.CPUCostConfig
-=======
 	nodeID             string
 	clusterID          string
 	cpuCostConfig      *config.CPUCostConfig
 	pulseSinkReapGrace atomic.Duration
->>>>>>> upstream/main
 
 	promCPULoad           prometheus.Gauge
 	promCgroupMemory      prometheus.Gauge
@@ -759,36 +753,7 @@ func (m *Monitor) updateEgressStats(stats *hwstats.ProcStats) {
 		}
 	}
 
-<<<<<<< HEAD
-	cpuKillThreshold := defaultKillThreshold
-	if cpuKillThreshold <= m.cpuCostConfig.MaxCpuUtilization {
-		cpuKillThreshold = (1 + m.cpuCostConfig.MaxCpuUtilization) / 2
-	}
-
-	if load > cpuKillThreshold {
-		logger.Warnw("high cpu usage", nil,
-			"cpu", load,
-			"requests", m.requests.Load(),
-		)
-
-		if m.requests.Load() > 1 {
-			m.highCPUDuration++
-			if m.highCPUDuration >= minKillDuration {
-				// BEGIN OPENVIDU BLOCK
-				if m.disableCpuOverloadKiller {
-					logger.Warnw("cpu overload killer is disabled, not killing egress", nil)
-				} else {
-					logger.Warnw("killing egress due to sustained high cpu", nil, "cpu", load)
-					m.svc.KillProcess(maxCPUEgress, errors.ErrCPUExhausted(maxCPU))
-				}
-				// END OPENVIDU BLOCK
-				m.highCPUDuration = 0
-			}
-		}
-	}
-=======
 	m.checkCPUKill(load, maxCPU, maxCPUEgress)
->>>>>>> upstream/main
 
 	totalMemory := 0
 	maxMemory := 0
@@ -945,6 +910,19 @@ func (m *Monitor) checkCPUKill(load, maxCPU float64, maxCPUEgress string) {
 	if m.requests.Load() <= 1 {
 		return
 	}
+
+	// BEGIN OPENVIDU BLOCK
+	// When the CPU overload killer is disabled, never stop or kill an egress
+	// due to sustained high CPU (a graceful stop still ends the egress), just
+	// log that the guard tripped.
+	if m.disableCpuOverloadKiller {
+		logger.Warnw("cpu overload killer is disabled, not stopping/killing egress", nil,
+			"cpu", load,
+			"egressID", maxCPUEgress,
+		)
+		return
+	}
+	// END OPENVIDU BLOCK
 
 	if m.cpuStopRequestedAt.IsZero() {
 		m.highCPUDuration++
