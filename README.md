@@ -1,3 +1,8 @@
+> This is OpenVidu's fork of [livekit/egress](https://github.com/livekit/egress), used
+> as-is as part of the OpenVidu Platform's media pipeline. See
+> [OpenVidu's Egress reference](https://openvidu.io/latest/docs/reference/egress/) for
+> how it's used in this platform.
+
 <!--BEGIN_BANNER_IMAGE-->
 
 <picture>
