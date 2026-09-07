@@ -29,6 +29,7 @@ import SingleSpeakerLayout from './SingleSpeakerLayout';
 import SpeakerLayout from './SpeakerLayout';
 
 const FRAME_DECODE_TIMEOUT = 5000;
+const NO_TRACKS_TIMEOUT = 10000;
 
 interface RoomPageProps {
   url: string;
@@ -68,7 +69,10 @@ function CompositeTemplate({ layout: initialLayout }: CompositeTemplateProps) {
     // the algorithm used is:
     // * if there are video tracks published, wait for frames to be decoded
     // * if there are no video tracks published, start immediately
-    // * if it's been more than 10s, record as long as there are tracks subscribed
+    // * if it's been more than 5s, record as long as there are tracks subscribed
+    // * if it's been more than 10s, record even with nothing subscribed: every
+    //   participant may be in the room with camera and microphone off, and waiting
+    //   for a track that is never published would stall the egress indefinitely
     const startTime = Date.now();
     const interval = setInterval(async () => {
       let shouldStartRecording = false;
@@ -101,6 +105,10 @@ function CompositeTemplate({ layout: initialLayout }: CompositeTemplateProps) {
         // adding a small timeout to ensure video tracks has a chance to be published
         shouldStartRecording = true;
       } else if (timeDelta > FRAME_DECODE_TIMEOUT && hasSubscribedTracks) {
+        shouldStartRecording = true;
+      } else if (timeDelta > NO_TRACKS_TIMEOUT && room.state === ConnectionState.Connected) {
+        // connected to a room that has published nothing at all, so none of the
+        // conditions above can ever be met; tracks are still rendered as they arrive
         shouldStartRecording = true;
       }
 
