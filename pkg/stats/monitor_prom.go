@@ -19,6 +19,8 @@ import (
 
 	"github.com/livekit/protocol/livekit"
 	"github.com/livekit/protocol/rpc"
+
+	"github.com/livekit/egress/pkg/types"
 )
 
 func (m *Monitor) initPrometheus() {
@@ -97,13 +99,104 @@ func (m *Monitor) initPrometheus() {
 		ConstLabels: prometheus.Labels{"node_id": m.nodeID, "cluster_id": m.clusterID},
 	})
 
+	m.promPulseSinks = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace:   "livekit",
+		Subsystem:   "egress",
+		Name:        "pulse_sinks",
+		Help:        "Number of egress-owned null-sinks loaded on the pulse daemon",
+		ConstLabels: prometheus.Labels{"node_id": m.nodeID, "cluster_id": m.clusterID},
+	})
+
+	m.handlerResults = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace:   "livekit",
+		Subsystem:   "egress",
+		Name:        "handler_results_total",
+		Help:        "Total number of egress handler outcomes, by result",
+		ConstLabels: prometheus.Labels{"node_id": m.nodeID, "cluster_id": m.clusterID},
+	}, []string{"type", "result"})
+	m.promLoadRatio = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace:   "livekit",
+		Name:        "load_ratio",
+		Help:        "Per-resource utilization ratio (0 = idle, can exceed 1 under overload)",
+		ConstLabels: prometheus.Labels{"node_id": m.nodeID, "cluster_id": m.clusterID},
+	}, []string{"type"})
+
 	prometheus.MustRegister(
 		promNodeAvailable, promCanAcceptRequest, promIsDisabled, promIsTerminating,
 		m.promCPULoad, m.requestGauge,
 		m.promCgroupMemory,
 		m.promCgroupReadSuccess, m.promProcRSS,
 		m.promWouldRejectCgroup,
+		m.promPulseSinks,
+		m.handlerResults,
+		m.promLoadRatio,
 	)
+}
+
+// Handler-level results (livekit_egress_handler_results_total)
+const (
+	ResultCompleted         = "completed"
+	ResultAborted           = "aborted"
+	ResultStoppedCPU        = "stopped_cpu"
+	ResultKilledCPU         = "killed_cpu"
+	ResultKilledOOM         = "killed_oom"
+	ResultKilledShutdown    = "killed_shutdown"
+	ResultProcessError      = "process_error"
+	ResultDuplicateIdentity = "duplicate_identity"
+)
+
+func requestTypeFromReq(req *rpc.StartEgressRequest) string {
+	switch r := req.Request.(type) {
+	case *rpc.StartEgressRequest_RoomComposite:
+		return types.RequestTypeRoomComposite
+	case *rpc.StartEgressRequest_Web:
+		return types.RequestTypeWeb
+	case *rpc.StartEgressRequest_Participant:
+		return types.RequestTypeParticipant
+	case *rpc.StartEgressRequest_TrackComposite:
+		return types.RequestTypeTrackComposite
+	case *rpc.StartEgressRequest_Track:
+		return types.RequestTypeTrack
+	case *rpc.StartEgressRequest_Replay:
+		return requestTypeFromInterface(r.Replay)
+	case *rpc.StartEgressRequest_Egress:
+		return requestTypeFromInterface(r.Egress)
+	}
+	return types.Unknown
+}
+
+func requestTypeFromInterface(request v2Request) string {
+	if request.GetPreset() == livekit.EncodingOptionsPreset_PASSTHROUGH {
+		return types.RequestTypeTrack
+	}
+	switch {
+	case request.GetTemplate() != nil:
+		return types.RequestTypeTemplate
+	case request.GetWeb() != nil:
+		return types.RequestTypeWeb
+	case request.GetMedia() != nil:
+		return types.RequestTypeMedia
+	default:
+		return types.Unknown
+	}
+}
+
+func (m *Monitor) HandlerResult(egressID string, result string) {
+	m.mu.Lock()
+	reqType := types.Unknown
+	if ps := m.pending[egressID]; ps != nil {
+		reqType = ps.requestType
+	} else {
+		for _, s := range m.procStats {
+			if s.egressID == egressID {
+				reqType = s.requestType
+				break
+			}
+		}
+	}
+	m.mu.Unlock()
+
+	m.handlerResults.With(prometheus.Labels{"type": reqType, "result": result}).Inc()
 }
 
 func (m *Monitor) promIsIdle() float64 {

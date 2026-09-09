@@ -64,7 +64,9 @@ type BaseConfig struct {
 	ChromeFlags                   map[string]interface{}              `yaml:"chrome_flags"`                       // additional flags to pass to Chrome
 	Latency                       LatencyConfig                       `yaml:"latency"`                            // gstreamer latencies, modifying these may break the service
 	LatencyOverrides              map[types.RequestType]LatencyConfig `yaml:"latency_overrides"`                  // latency overrides for different request types, experimental only, will be removed
+	VideoEncoderThreads           uint                                `yaml:"video_encoder_threads"`              // x264enc thread count, 0 = x264 auto (1.5x host cores)
 	EnableOneShotSenderReportSync bool                                `yaml:"enable_one_shot_sender_report_sync"` // temporary rollout flag enabling one-shot sender report correction for room composite / track requests that previously used audio PTS adjustment disabling
+	EnableSyncEngine              bool                                `yaml:"enable_sync_engine"`                 // use Chrome-inspired sync engine for improved cross-participant alignment and A/V sync
 	AudioTempoController          AudioTempoController                `yaml:"audio_tempo_controller"`             // audio tempo controller
 	TestOverrides                 TestOverrides                       `yaml:"test_overrides"`                     // set of config overrides for testing purposes
 }
@@ -100,7 +102,7 @@ type AudioTempoController struct {
 	AdjustmentRate float64 `yaml:"adjustment_rate"` // rate at which to adjust the tempo to compensate for PTS drift
 }
 
-func (c *BaseConfig) initLogger(values ...interface{}) error {
+func (c *BaseConfig) InitLogger(serviceName string, values ...interface{}) error {
 	_, exists := os.LookupEnv("GST_DEBUG")
 
 	// If GST_DEBUG is not set, use pre-defined values based on logging level
@@ -131,8 +133,8 @@ func (c *BaseConfig) initLogger(values ...interface{}) error {
 
 	l := zl.WithValues(values...)
 
-	logger.SetLogger(l, "egress")
-	lksdk.SetLogger(medialogutils.NewOverrideLogger(l.WithComponent("lksdk")))
+	logger.SetLogger(l, serviceName)
+	lksdk.SetLogger(medialogutils.NewOverrideLogger(logger.GetLogger().WithComponent("lksdk")))
 	return nil
 }
 

@@ -38,12 +38,6 @@ import (
 	"github.com/livekit/protocol/livekit"
 )
 
-const (
-	maxRetries = 5
-	minDelay   = time.Millisecond * 100
-	maxDelay   = time.Second * 5
-)
-
 var (
 	segmentTimeRegexp = regexp.MustCompile(`_(\d{14})(\d{3})\.ts`)
 )
@@ -297,14 +291,19 @@ func verify(t *testing.T, in string, p *config.PipelineConfig, res *livekit.Egre
 		}
 	}
 
+	// passthrough derives the out codecs at subscribe time, so this config never carries them
 	if p.AudioEnabled {
 		require.True(t, hasAudio)
-		require.NotEmpty(t, p.AudioOutCodec)
+		if !p.Passthrough {
+			require.NotEmpty(t, p.AudioOutCodec)
+		}
 	}
 
 	if p.VideoEnabled {
 		require.True(t, hasVideo)
-		require.NotEmpty(t, p.VideoOutCodec)
+		if !p.Passthrough {
+			require.NotEmpty(t, p.VideoOutCodec)
+		}
 	}
 	return info
 }

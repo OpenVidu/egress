@@ -17,7 +17,7 @@ package source
 import (
 	"testing"
 
-	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/atomic"
 
 	"github.com/livekit/egress/pkg/config"
@@ -45,7 +45,7 @@ func testSDKSource(t *testing.T) *SDKSource {
 	return &SDKSource{
 		PipelineConfig:       pipelineConfig,
 		callbacks:            callbacks,
-		sync:                 synchronizer.NewSynchronizer(nil),
+		sync:                 synchronizer.NewSynchronizer(nil).AsSyncInterface(),
 		workers:              make(map[string]*trackWorker),
 		filenameReplacements: make(map[string]string),
 		active:               atomic.Int32{},
@@ -59,7 +59,7 @@ func TestGetOrCreateWorker_ReturnsExistingWorker(t *testing.T) {
 	w1 := s.getOrCreateWorker("track-1")
 	w2 := s.getOrCreateWorker("track-1")
 
-	assert.Equal(t, w1, w2, "should return same worker for same trackID")
+	require.Equal(t, w1, w2, "should return same worker for same trackID")
 }
 
 func TestGetOrCreateWorker_ReturnsNilWhenClosing(t *testing.T) {
@@ -68,7 +68,7 @@ func TestGetOrCreateWorker_ReturnsNilWhenClosing(t *testing.T) {
 
 	w := s.getOrCreateWorker("track-1")
 
-	assert.Nil(t, w, "should return nil when closing")
+	require.Nil(t, w, "should return nil when closing")
 }
 
 func TestSubmitOp_DropsOpWhenClosing(t *testing.T) {
@@ -82,7 +82,7 @@ func TestSubmitOp_DropsOpWhenClosing(t *testing.T) {
 	_, exists := s.workers["track-1"]
 	s.workersMu.RUnlock()
 
-	assert.False(t, exists)
+	require.False(t, exists)
 }
 
 func TestStateTransitions_IdleState(t *testing.T) {
@@ -113,8 +113,8 @@ func TestStateTransitions_IdleState(t *testing.T) {
 
 			exit := s.processOp(w, "test-track", state, Operation{Type: tt.op})
 
-			assert.Equal(t, tt.wantExit, exit, "exit mismatch")
-			assert.Equal(t, tt.wantState, state.state, "state mismatch")
+			require.Equal(t, tt.wantExit, exit, "exit mismatch")
+			require.Equal(t, tt.wantState, state.state, "state mismatch")
 		})
 	}
 }
@@ -151,8 +151,71 @@ func TestStateTransitions_ActiveState(t *testing.T) {
 
 			exit := s.processOp(w, "test-track", state, Operation{Type: tt.op, Generation: 1})
 
-			assert.Equal(t, tt.wantExit, exit, "exit mismatch")
-			assert.Equal(t, tt.wantState, state.state, "state mismatch")
+			require.Equal(t, tt.wantExit, exit, "exit mismatch")
+			require.Equal(t, tt.wantState, state.state, "state mismatch")
 		})
 	}
+}
+
+// newIdleWorker registers a worker without starting its goroutine, so the test
+// can inspect exactly which operations were delivered to it.
+func newIdleWorker(s *SDKSource, trackID string) *trackWorker {
+	w := &trackWorker{
+		trackID:    trackID,
+		opChan:     make(chan Operation, 100),
+		generation: atomic.Uint64{},
+	}
+	w.generation.Store(1)
+
+	s.workersMu.Lock()
+	s.workers[trackID] = w
+	s.workersMu.Unlock()
+
+	return w
+}
+
+func delivered(w *trackWorker) []OpType {
+	var ops []OpType
+	for {
+		select {
+		case op := <-w.opChan:
+			ops = append(ops, op.Type)
+		default:
+			return ops
+		}
+	}
+}
+
+// TestPlayingLostAfterCloseWriters: once CloseWriters() sets closing, submitOp()
+// drops OpPlaying, so a writer whose appsrc was linked just before shutdown is
+// never told it reached PLAYING. This is why cleanup keys off addedToPipeline
+// rather than playing.
+func TestPlayingLostAfterCloseWriters(t *testing.T) {
+	s := testSDKSource(t)
+	w := newIdleWorker(s, "track-1")
+
+	// shutdown begins while the new appsrc is mid state-change
+	s.CloseWriters()
+
+	// GStreamer reports PLAYING only afterwards
+	s.Playing("track-1")
+
+	ops := delivered(w)
+	require.Contains(t, ops, OpClose)
+	require.NotContains(t, ops, OpPlaying,
+		"OpPlaying is dropped once closing is set, so writer.Playing() is never called")
+}
+
+// TestPlayingDeliveredBeforeClose is the control: with closing unset, OpPlaying
+// is delivered normally.
+func TestPlayingDeliveredBeforeClose(t *testing.T) {
+	s := testSDKSource(t)
+	w := newIdleWorker(s, "track-1")
+
+	s.Playing("track-1")
+	s.CloseWriters()
+
+	ops := delivered(w)
+	require.Contains(t, ops, OpPlaying)
+	require.Contains(t, ops, OpClose)
 }

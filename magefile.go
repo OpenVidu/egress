@@ -24,15 +24,17 @@ import (
 	"path"
 	"runtime"
 	"strings"
+	"time"
+
+	"github.com/livekit/mageutil"
 
 	"github.com/livekit/egress/version"
-	"github.com/livekit/mageutil"
 )
 
 const (
 	gstVersion      = "1.24.12"
 	libniceVersion  = "0.1.21"
-	chromiumVersion = "146.0.7680.177-1"
+	chromiumVersion = "150.0.7871.46"
 	dockerBuild     = "docker build"
 	dockerBuildX    = "docker buildx build --push --platform linux/amd64,linux/arm64"
 )
@@ -118,8 +120,11 @@ func Integration(configFile string) error {
 	os.Setenv("DOCKER_BUILDKIT", "1")
 	defer os.Unsetenv("DOCKER_BUILDKIT")
 
+	// Date-only stamp so a local build refreshes security updates at most once a day.
+	securityRefresh := time.Now().UTC().Format("20060102")
+
 	if err := mageutil.Run(ctx,
-		fmt.Sprintf("docker build --build-arg TEMPLATE_TAG=%s --build-arg DEADLOCK=1 -t egress-test -f build/test/Dockerfile .", version.TemplateVersion),
+		fmt.Sprintf("docker build --build-arg TEMPLATE_TAG=%s --build-arg DEADLOCK=1 --build-arg SECURITY_REFRESH=%s -t egress-test -f build/test/Dockerfile .", version.TemplateVersion, securityRefresh),
 	); err != nil {
 		return err
 	}
@@ -169,10 +174,13 @@ func Retest(configFile string) error {
 }
 
 func Build() error {
+	// Date-only stamp so a local build refreshes security updates at most once a day.
+	securityRefresh := time.Now().UTC().Format("20060102")
+
 	return mageutil.Run(context.Background(),
 		fmt.Sprintf("docker pull livekit/chrome-installer:%s", chromiumVersion),
 		fmt.Sprintf("docker pull livekit/gstreamer:%s-dev", gstVersion),
-		fmt.Sprintf("docker build -t livekit/egress:latest --build-arg TEMPLATE_TAG=%s -f build/egress/Dockerfile .", version.TemplateVersion),
+		fmt.Sprintf("docker build -t livekit/egress:latest --build-arg TEMPLATE_TAG=%s --build-arg SECURITY_REFRESH=%s -f build/egress/Dockerfile .", version.TemplateVersion, securityRefresh),
 	)
 }
 
@@ -188,7 +196,7 @@ func BuildGStreamer() error {
 }
 
 func buildGstreamer(cmd string) error {
-	commands := []string{"docker pull ubuntu:23.10"}
+	commands := []string{}
 	for _, build := range []string{"base", "dev", "prod", "prod-rs"} {
 		commands = append(commands, fmt.Sprintf("%s"+
 			" --build-arg GSTREAMER_VERSION=%s"+
