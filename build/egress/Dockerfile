@@ -101,6 +101,12 @@ COPY --from=livekit/chrome-installer:150.0.7871.46 /chrome-installer /chrome-ins
 
 RUN /chrome-installer/install-chrome "$TARGETPLATFORM"
 
+# BEGIN OPENVIDU BLOCK
+# Chrome policy: no default search provider, so Chrome does not preconnect to it at startup
+COPY build/egress/chrome-policy.json /etc/opt/chrome/policies/managed/openvidu.json
+COPY build/egress/chrome-policy.json /etc/chromium/policies/managed/openvidu.json
+# END OPENVIDU BLOCK
+
 # clean up
 RUN rm -rf /var/lib/apt/lists/*
 

@@ -255,6 +255,23 @@ func (s *WebSource) launchChrome(ctx context.Context, p *config.PipelineConfig) 
 		chromedp.Flag("password-store", "basic"),
 		chromedp.Flag("use-mock-keychain", true),
 
+		// BEGIN OPENVIDU BLOCK
+		// No background requests to Google services. disable-features repeats the puppeteer
+		// list above (the last value of a flag wins). The account listing and the push messaging
+		// connection cannot be switched off, so their hosts never resolve.
+		chromedp.Flag("disable-features", "AudioServiceOutOfProcess,site-per-process,Translate,TranslateUI,BlinkGenPropertyTrees,"+
+			"OptimizationHints,OptimizationGuideModelDownloading,OptimizationHintsFetching,MediaRouter,DialMediaRouteProvider,"+
+			"NetworkTimeServiceQuerying,SafeBrowsingRealTimeUrlLookup,SafeBrowsingHashPrefixRealTimeLookups,HashPrefixRealTimeLookups,"+
+			"PushMessaging,AutofillServerCommunication,CertificateTransparencyComponentUpdater,PreconnectToSearch"),
+		chromedp.Flag("disable-component-update", true),
+		chromedp.Flag("disable-domain-reliability", true),
+		chromedp.Flag("disable-field-trial-config", true),
+		chromedp.Flag("no-pings", true),
+		chromedp.Flag("no-first-run", true),
+		chromedp.Flag("no-default-browser-check", true),
+		chromedp.Flag("host-resolver-rules", "MAP accounts.google.com ~NOTFOUND, MAP mtalk.google.com ~NOTFOUND, MAP android.clients.google.com ~NOTFOUND"),
+		// END OPENVIDU BLOCK
+
 		// custom args
 		chromedp.Flag("kiosk", true),
 		chromedp.Flag("disable-translate", true),
