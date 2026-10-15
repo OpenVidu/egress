@@ -35,6 +35,17 @@ var (
 	twitchEndpoint = regexp.MustCompile(`^rtmps?://.*\.contribute\.live-video\.net/app/(.*)( live=1)?$`)
 )
 
+// BEGIN OPENVIDU BLOCK
+// A client tells the streams of an egress apart by a tag it appends to each url as a fragment:
+// rtmp://host/app/stream_key#ov-stream-tag=<tag>. The egress streams to the url without it and
+// reports it after the redacted url, which alone cannot identify a stream: stream keys with the
+// same ends redact alike, a url streamed to again repeats, and streams come in no fixed order.
+const streamTagPrefix = "#ov-stream-tag="
+
+var streamTagRegexp = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
+
+// END OPENVIDU BLOCK
+
 func (o *StreamConfig) AddStream(rawUrl string, outputType types.OutputType) (*Stream, error) {
 	parsed, redacted, streamID, err := o.ValidateUrl(rawUrl, outputType)
 	if err != nil {
@@ -61,6 +72,18 @@ func (o *StreamConfig) AddStream(rawUrl string, outputType types.OutputType) (*S
 func (o *StreamConfig) ValidateUrl(rawUrl string, outputType types.OutputType) (
 	parsed string, redacted string, streamID string, err error,
 ) {
+	// BEGIN OPENVIDU BLOCK
+	rawUrl, tag, err := splitStreamTag(rawUrl)
+	if err != nil {
+		return
+	}
+	defer func() {
+		if err == nil {
+			redacted += tag
+		}
+	}()
+	// END OPENVIDU BLOCK
+
 	parsedUrl, err := url.Parse(rawUrl)
 	if err != nil {
 		err = errors.ErrInvalidUrl(rawUrl, err.Error())
@@ -107,6 +130,13 @@ func (o *StreamConfig) ValidateUrl(rawUrl string, outputType types.OutputType) (
 }
 
 func (o *StreamConfig) GetStream(rawUrl string) (*Stream, error) {
+	// BEGIN OPENVIDU BLOCK
+	rawUrl, _, err := splitStreamTag(rawUrl)
+	if err != nil {
+		return nil, err
+	}
+	// END OPENVIDU BLOCK
+
 	parsedUrl, err := url.Parse(rawUrl)
 	if err != nil {
 		return nil, errors.ErrInvalidUrl(rawUrl, err.Error())
@@ -190,3 +220,22 @@ func redactStreamKey(url string) (string, string, bool) {
 	match[4] = utils.RedactIdentifier(match[4])
 	return strings.Join(match[1:], ""), streamID, true
 }
+
+// BEGIN OPENVIDU BLOCK
+// splitStreamTag separates the tag a client appended to a stream url from the url it streams to.
+func splitStreamTag(rawUrl string) (string, string, error) {
+	i := strings.LastIndex(rawUrl, streamTagPrefix)
+	if i < 0 {
+		return rawUrl, "", nil
+	}
+
+	untagged, tag := rawUrl[:i], rawUrl[i:]
+	if !streamTagRegexp.MatchString(strings.TrimPrefix(tag, streamTagPrefix)) {
+		redacted, _ := utils.RedactStreamKey(untagged)
+		return "", "", errors.ErrInvalidUrl(redacted, "stream tags must be 1 to 128 letters, digits, '_' or '-'")
+	}
+
+	return untagged, tag, nil
+}
+
+// END OPENVIDU BLOCK
