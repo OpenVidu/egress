@@ -94,9 +94,10 @@ type SDKSourceParams struct {
 	TrackSource     string
 	TrackKind       string
 	ScreenShare     bool
+	Compositing     bool
 	VideoInCodec    types.MimeType
 	AudioTracks     []*TrackSource
-	VideoTrack      *TrackSource
+	VideoTracks     []*TrackSource
 	AudioRoutes     []AudioRouteConfig
 	CaptureAudioAll bool
 }
@@ -113,16 +114,20 @@ type AudioRouteMatch struct {
 }
 
 type TrackSource struct {
-	TrackID            string
-	TrackKind          lksdk.TrackKind
-	ParticipantKind    lksdk.ParticipantKind
-	AudioChannel       *livekit.AudioChannel
-	AppSrc             *app.Source
-	MimeType           types.MimeType
-	PayloadType        webrtc.PayloadType
-	ClockRate          uint32
-	TempoController    *tempo.Controller
-	OnKeyframeRequired func()
+	TrackID             string
+	TrackKind           lksdk.TrackKind
+	ParticipantIdentity string
+	PublicationSource   livekit.TrackSource
+	ParticipantKind     lksdk.ParticipantKind
+	AudioChannel        *livekit.AudioChannel
+	AppSrc              *app.Source
+	MimeType            types.MimeType
+	PayloadType         webrtc.PayloadType
+	ClockRate           uint32
+	Stereo              bool
+	TempoController     *tempo.Controller
+	OnKeyframeRequired  func()
+	OnKeyframeReceived  func()
 }
 
 type AudioConfig struct {
@@ -152,7 +157,7 @@ func NewPipelineConfig(confString string, req *rpc.StartEgressRequest) (*Pipelin
 	p := &PipelineConfig{
 		BaseConfig: BaseConfig{
 			Logging: &logger.Config{
-				Level: "info",
+				Level: logLevelInfo,
 			},
 		},
 		Outputs: make(map[types.EgressType][]OutputConfig),
@@ -229,7 +234,11 @@ func (p *PipelineConfig) Update(request *rpc.StartEgressRequest) error {
 		}
 		egress.RedactEncodedOutputs(clone)
 
-		if ShouldUseSDKSource(req.RoomComposite) {
+		if p.UsesTemplateSDKCompositing(req.RoomComposite.CustomBaseUrl) {
+			p.AudioMixing = req.RoomComposite.AudioMixing
+			p.SourceType = types.SourceTypeSDK
+			p.Compositing = !req.RoomComposite.AudioOnly
+		} else if ShouldUseSDKSource(req.RoomComposite) {
 			p.AudioMixing = req.RoomComposite.AudioMixing
 			p.SourceType = types.SourceTypeSDK
 		} else {
@@ -245,9 +254,11 @@ func (p *PipelineConfig) Update(request *rpc.StartEgressRequest) error {
 		} else {
 			p.BaseUrl = p.TemplateBase
 		}
-		baseUrl, err := url.Parse(p.BaseUrl)
-		if err != nil || !isHttp(baseUrl) {
-			return errors.ErrInvalidInput("template base url")
+		if p.SourceType == types.SourceTypeWeb {
+			baseUrl, err := url.Parse(p.BaseUrl)
+			if err != nil || !isHttp(baseUrl) {
+				return errors.ErrInvalidInput("template base url")
+			}
 		}
 
 		if !req.RoomComposite.VideoOnly {
@@ -269,13 +280,13 @@ func (p *PipelineConfig) Update(request *rpc.StartEgressRequest) error {
 			p.applyPreset(opts.Preset)
 
 		case *livekit.RoomCompositeEgressRequest_Advanced:
-			if err = p.applyAdvanced(opts.Advanced); err != nil {
+			if err := p.applyAdvanced(opts.Advanced); err != nil {
 				return err
 			}
 		}
 
 		// output params
-		if err = p.updateEncodedOutputs(req.RoomComposite); err != nil {
+		if err := p.updateEncodedOutputs(req.RoomComposite); err != nil {
 			return err
 		}
 
@@ -561,21 +572,35 @@ func ShouldUseSDKSource(req interface {
 	return req.GetAudioOnly() && req.GetLayout() == "" && req.GetCustomBaseUrl() == ""
 }
 
-func IsSDKSourceRequest(req *rpc.StartEgressRequest) bool {
+// UsesTemplateSDKCompositing reports whether a request takes the SDK compositor instead of Chrome
+func (c *BaseConfig) UsesTemplateSDKCompositing(customBaseUrl string) bool {
+	return c.EnableTemplateSDK && customBaseUrl == ""
+}
+
+// TemplateSourceIsSDK reports whether a request runs on the SDK source; routing and admission must agree or capacity is misbooked
+func (c *BaseConfig) TemplateSourceIsSDK(req interface {
+	GetLayout() string
+	GetAudioOnly() bool
+	GetCustomBaseUrl() string
+}) bool {
+	return c.UsesTemplateSDKCompositing(req.GetCustomBaseUrl()) || ShouldUseSDKSource(req)
+}
+
+func (c *BaseConfig) IsSDKSourceRequest(req *rpc.StartEgressRequest) bool {
 	switch r := req.Request.(type) {
 	case *rpc.StartEgressRequest_RoomComposite:
-		return ShouldUseSDKSource(r.RoomComposite)
+		return c.TemplateSourceIsSDK(r.RoomComposite)
 	case *rpc.StartEgressRequest_Web:
 		return false
 	case *rpc.StartEgressRequest_Egress:
-		return isV2SDKSource(r.Egress)
+		return c.isV2SDKSource(r.Egress)
 	case *rpc.StartEgressRequest_Replay:
-		return isV2SDKSource(r.Replay)
+		return c.isV2SDKSource(r.Replay)
 	}
 	return true
 }
 
-func isV2SDKSource(req egress.EgressRequest) bool {
+func (c *BaseConfig) isV2SDKSource(req egress.EgressRequest) bool {
 	if req == nil {
 		return true
 	}
@@ -583,7 +608,7 @@ func isV2SDKSource(req egress.EgressRequest) bool {
 		return false
 	}
 	if t := req.GetTemplate(); t != nil {
-		return ShouldUseSDKSource(t)
+		return c.TemplateSourceIsSDK(t)
 	}
 	return true
 }
@@ -598,7 +623,10 @@ func (p *PipelineConfig) applyV2Source(req egress.EgressRequest) (connectionInfo
 		tmpl := req.GetTemplate()
 		p.RequestType = types.RequestTypeTemplate
 
-		if ShouldUseSDKSource(tmpl) {
+		if p.UsesTemplateSDKCompositing(tmpl.CustomBaseUrl) {
+			p.SourceType = types.SourceTypeSDK
+			p.Compositing = !tmpl.AudioOnly
+		} else if ShouldUseSDKSource(tmpl) {
 			p.SourceType = types.SourceTypeSDK
 		} else {
 			p.SourceType = types.SourceTypeWeb
@@ -611,9 +639,11 @@ func (p *PipelineConfig) applyV2Source(req egress.EgressRequest) (connectionInfo
 		} else {
 			p.BaseUrl = p.TemplateBase
 		}
-		baseUrl, perr := url.Parse(p.BaseUrl)
-		if perr != nil || !isHttp(baseUrl) {
-			return connectionInfoRequired, errors.ErrInvalidInput("template base url")
+		if p.SourceType == types.SourceTypeWeb {
+			baseUrl, perr := url.Parse(p.BaseUrl)
+			if perr != nil || !isHttp(baseUrl) {
+				return connectionInfoRequired, errors.ErrInvalidInput("template base url")
+			}
 		}
 
 		if !tmpl.VideoOnly {
@@ -856,7 +886,7 @@ func (p *PipelineConfig) validateAndUpdateOutputCodecs() (compatibleAudioCodecs 
 		for _, o := range p.GetEncodedOutputs() {
 			compatibleVideoCodecs = types.GetMapIntersection(compatibleVideoCodecs, types.CodecCompatibility[o.GetOutputType()])
 			if len(compatibleVideoCodecs) == 0 {
-				if p.AudioOutCodec == "" {
+				if p.VideoOutCodec == "" {
 					return nil, nil, errors.ErrNoCompatibleCodec
 				}
 				// Return a more specific error if a codec was provided
@@ -963,6 +993,11 @@ func (p *PipelineConfig) GetEncodedOutputs() []OutputConfig {
 	}
 
 	return ret
+}
+
+// OpusPassthrough reports whether a track of this codec is written to the file without decoding
+func (p *PipelineConfig) OpusPassthrough(mimeType types.MimeType) bool {
+	return p.Passthrough && p.RequestType == types.RequestTypeMedia && mimeType == types.MimeTypeOpus && p.GetFileConfig() != nil
 }
 
 func isHttp(parsedUrl *url.URL) bool {

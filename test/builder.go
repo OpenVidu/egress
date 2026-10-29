@@ -104,6 +104,11 @@ type publishOptions struct {
 
 	layout string
 
+	// chromeCompositing runs this case through chrome instead of the SDK
+	// compositor. The runner enables EnableTemplateSDK globally, so without
+	// this the shipped default (enable_template_sdk: false) has no coverage.
+	chromeCompositing bool
+
 	multiParticipant bool
 
 	// v2 Media source fields
@@ -135,6 +140,7 @@ type segmentOptions struct {
 	livePlaylist    string
 	suffix          livekit.SegmentedFileSuffix
 	segmentDuration uint32
+	protocol        livekit.SegmentedFileProtocol
 }
 
 type imageOptions struct {
@@ -357,6 +363,7 @@ func (r *Runner) buildSegmentOutputs(o *segmentOptions) []*livekit.SegmentedFile
 			LivePlaylistName: o.livePlaylist,
 			FilenameSuffix:   o.suffix,
 			SegmentDuration:  o.segmentDuration,
+			Protocol:         o.protocol,
 		}
 
 		switch conf := u.(type) {
@@ -377,6 +384,7 @@ func (r *Runner) buildSegmentOutputs(o *segmentOptions) []*livekit.SegmentedFile
 		LivePlaylistName: o.livePlaylist,
 		FilenameSuffix:   o.suffix,
 		SegmentDuration:  o.segmentDuration,
+		Protocol:         o.protocol,
 	}}
 }
 

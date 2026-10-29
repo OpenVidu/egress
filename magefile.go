@@ -32,9 +32,9 @@ import (
 )
 
 const (
-	gstVersion      = "1.24.12"
+	gstVersionFile  = ".gst-version"
 	libniceVersion  = "0.1.21"
-	chromiumVersion = "150.0.7871.46"
+	chromiumVersion = "156.0.8078.47"
 	dockerBuild     = "docker build"
 	dockerBuildX    = "docker buildx build --push --platform linux/amd64,linux/arm64"
 )
@@ -123,8 +123,13 @@ func Integration(configFile string) error {
 	// Date-only stamp so a local build refreshes security updates at most once a day.
 	securityRefresh := time.Now().UTC().Format("20060102")
 
+	gstVersion, err := getGstVersion()
+	if err != nil {
+		return err
+	}
+
 	if err := mageutil.Run(ctx,
-		fmt.Sprintf("docker build --build-arg TEMPLATE_TAG=%s --build-arg DEADLOCK=1 --build-arg SECURITY_REFRESH=%s -t egress-test -f build/test/Dockerfile .", version.TemplateVersion, securityRefresh),
+		fmt.Sprintf("docker build --build-arg GSTVERSION=%s --build-arg TEMPLATE_TAG=%s --build-arg DEADLOCK=1 --build-arg SECURITY_REFRESH=%s -t egress-test -f build/test/Dockerfile .", gstVersion, version.TemplateVersion, securityRefresh),
 	); err != nil {
 		return err
 	}
@@ -177,10 +182,15 @@ func Build() error {
 	// Date-only stamp so a local build refreshes security updates at most once a day.
 	securityRefresh := time.Now().UTC().Format("20060102")
 
+	gstVersion, err := getGstVersion()
+	if err != nil {
+		return err
+	}
+
 	return mageutil.Run(context.Background(),
 		fmt.Sprintf("docker pull livekit/chrome-installer:%s", chromiumVersion),
 		fmt.Sprintf("docker pull livekit/gstreamer:%s-dev", gstVersion),
-		fmt.Sprintf("docker build -t livekit/egress:latest --build-arg TEMPLATE_TAG=%s --build-arg SECURITY_REFRESH=%s -f build/egress/Dockerfile .", version.TemplateVersion, securityRefresh),
+		fmt.Sprintf("docker build -t livekit/egress:latest --build-arg GSTVERSION=%s --build-arg TEMPLATE_TAG=%s --build-arg SECURITY_REFRESH=%s -f build/egress/Dockerfile .", gstVersion, version.TemplateVersion, securityRefresh),
 	)
 }
 
@@ -196,8 +206,21 @@ func BuildGStreamer() error {
 }
 
 func buildGstreamer(cmd string) error {
+	gstVersion, err := getGstVersion()
+	if err != nil {
+		return err
+	}
+
+	// The base stage downloads upstream sources, so it needs the upstream release without the
+	// image revision suffix; the later stages only use the value in FROM lines and take the full tag.
+	upstreamVersion, _, _ := strings.Cut(gstVersion, "-")
+
 	commands := []string{}
 	for _, build := range []string{"base", "dev", "prod", "prod-rs"} {
+		buildArgVersion := gstVersion
+		if build == "base" {
+			buildArgVersion = upstreamVersion
+		}
 		commands = append(commands, fmt.Sprintf("%s"+
 			" --build-arg GSTREAMER_VERSION=%s"+
 			" --build-arg LIBNICE_VERSION=%s"+
@@ -205,7 +228,7 @@ func buildGstreamer(cmd string) error {
 			" -t livekit/gstreamer:%s-%s-%s"+
 			" -f build/gstreamer/Dockerfile-%s"+
 			" ./build/gstreamer",
-			cmd, gstVersion, libniceVersion, gstVersion, build, gstVersion, build, runtime.GOARCH, build,
+			cmd, buildArgVersion, libniceVersion, gstVersion, build, gstVersion, build, runtime.GOARCH, build,
 		))
 	}
 
@@ -241,4 +264,21 @@ func Dotfiles() error {
 	}
 
 	return nil
+}
+
+// getGstVersion returns the GStreamer version pinned in .gst-version, the single source of
+// truth for the livekit/gstreamer version this repo builds and builds against. CI and the
+// Dockerfiles take it as the GSTVERSION build arg.
+func getGstVersion() (string, error) {
+	b, err := os.ReadFile(gstVersionFile)
+	if err != nil {
+		return "", err
+	}
+
+	v := strings.TrimSpace(string(b))
+	if v == "" {
+		return "", fmt.Errorf("%s is empty", gstVersionFile)
+	}
+
+	return v, nil
 }

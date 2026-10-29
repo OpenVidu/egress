@@ -59,15 +59,15 @@ func MarkDestinationError(err error) error {
 }
 
 // IsDestinationError reports whether a failure was caused by the user-configured
-// destination rather than by the egress service: a marked error, a 4xx response
-// from storage, or a DNS resolution failure for a user-provided host.
+// destination rather than by the egress service: a marked error, a 4xx or 5xx
+// response from storage, or a DNS resolution failure for a user-provided host.
 func IsDestinationError(err error) bool {
 	if errors.Is(err, errDestinationMarker) {
 		return true
 	}
 
 	var statusErr *storage.ErrorWithStatusCode
-	if errors.As(err, &statusErr) && statusErr.StatusCode >= 400 && statusErr.StatusCode < 500 {
+	if errors.As(err, &statusErr) && statusErr.StatusCode >= 400 && statusErr.StatusCode < 600 {
 		return true
 	}
 
@@ -156,6 +156,7 @@ var (
 	ErrShuttingDown               = psrpc.NewErrorf(psrpc.Unavailable, "server is shutting down")
 	ErrNonRetryableOutput         = psrpc.NewErrorf(psrpc.FailedPrecondition, "output configuration does not support retry")
 	ErrHandlerFailedToStart       = psrpc.NewErrorf(psrpc.Internal, "handler failed to start")
+	ErrHandlerExitedBeforeReady   = psrpc.NewErrorf(psrpc.FailedPrecondition, "handler exited before ready")
 	ErrRoomConnectionFailed       = psrpc.NewErrorf(psrpc.Unavailable, "recording ended early: connection to room failed")
 	ErrPersistentFlushing         = psrpc.NewErrorf(psrpc.Internal, "recording ended early: track stuck in persistent FlowFlushing")
 )

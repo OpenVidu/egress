@@ -147,14 +147,15 @@ func (s *Server) launchProcess(req *rpc.StartEgressRequest, info *livekit.Egress
 	cmd.Stderr = l
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 
-	if err = s.Launch(context.Background(), handlerID, req, info, cmd); err != nil {
+	wait, err := s.Launch(context.Background(), handlerID, req, info, cmd)
+	if err != nil {
 		_ = l.Close()
 		return err
 	}
 
 	s.monitor.UpdatePID(info.EgressId, cmd.Process.Pid)
 	go func() {
-		err = cmd.Wait()
+		err = wait()
 		_ = l.Close()
 
 		if reason := s.GetKillReason(info.EgressId); reason != "" {
@@ -193,7 +194,7 @@ func (s *Server) processEnded(req *rpc.StartEgressRequest, info *livekit.EgressI
 			"egressID", info.EgressId,
 			"requestType", requestType,
 			"outputType", outputType,
-			"sdkSource", config.IsSDKSourceRequest(req),
+			"sdkSource", s.conf.IsSDKSourceRequest(req),
 			"avgCPU", avgCPU,
 			"maxCPU", maxCPU,
 			"maxMemory", maxMemory,

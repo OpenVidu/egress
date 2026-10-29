@@ -48,9 +48,10 @@ const (
 	defaultTemplatePort         = 7980
 	defaultTemplateBaseTemplate = "http://localhost:%d/"
 
-	defaultIOCreateTimeout = time.Second * 15
-	defaultIOUpdateTimeout = time.Second * 30
-	defaultIOWorkers       = 5
+	defaultIOCreateTimeout       = time.Second * 15
+	defaultIOUpdateTimeout       = time.Second * 30
+	defaultIOWorkers             = 5
+	defaultIOUpdateRetryDeadline = time.Minute * 10
 
 	defaultJitterBufferLatency   = time.Second * 2
 	defaultAudioMixerLatency     = time.Millisecond * 2750
@@ -122,7 +123,7 @@ func NewServiceConfig(confString string) (*ServiceConfig, error) {
 	conf := &ServiceConfig{
 		BaseConfig: BaseConfig{
 			Logging: &logger.Config{
-				Level: "info",
+				Level: logLevelInfo,
 			},
 			ApiKey:    os.Getenv("LIVEKIT_API_KEY"),
 			ApiSecret: os.Getenv("LIVEKIT_API_SECRET"),
@@ -186,6 +187,9 @@ func (c *ServiceConfig) InitDefaults() {
 	}
 	if c.IOWorkers <= 0 {
 		c.IOWorkers = defaultIOWorkers
+	}
+	if c.IOUpdateRetryDeadline == 0 {
+		c.IOUpdateRetryDeadline = defaultIOUpdateRetryDeadline
 	}
 
 	// Setting CPU costs from config. Ensure that CPU costs are positive

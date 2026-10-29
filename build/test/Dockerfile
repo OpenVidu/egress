@@ -15,11 +15,18 @@
 # syntax=docker/dockerfile:1.6
 ARG TARGETPLATFORM
 ARG TEMPLATE_TAG=latest
-ARG LINT_VERSION=v2.11.3
+ARG LINT_VERSION=v2.14.0
+
+# The GStreamer version is pinned in .gst-version, the single source of truth that
+# Renovate keeps current via an approvable PR. It has no default here on purpose: a
+# default would be a second copy of the version and would drift. The magefile and CI
+# read the file and pass it in, so build this by hand with
+# --build-arg GSTVERSION=$(cat .gst-version).
+ARG GSTVERSION
 
 FROM livekit/egress-templates:$TEMPLATE_TAG AS template
 
-FROM livekit/gstreamer:1.24.12-dev AS builder
+FROM livekit/gstreamer:$GSTVERSION-dev AS builder
 
 WORKDIR /workspace
 
@@ -112,9 +119,31 @@ RUN --mount=type=cache,target=/go/pkg/mod,sharing=locked \
 RUN echo ok >/unit_ok
 
 
-FROM livekit/gstreamer:1.24.12-prod
+FROM livekit/gstreamer:$GSTVERSION-prod-rs AS rs-plugins
+
+RUN --mount=type=bind,source=build/egress,target=/build \
+    /build/copy-rs-plugins /build/egress-rs-elements /rs-plugins
+
+FROM livekit/gstreamer:$GSTVERSION-prod
+
+# gst-plugins-rs plugins listed in build/egress/egress-rs-elements
+COPY --from=rs-plugins /rs-plugins/ /
+
+# fail the build if a listed element does not load in this image
+RUN --mount=type=bind,source=build/egress/egress-rs-elements,target=/egress-rs-elements \
+    grep -v -e '^#' -e '^$' /egress-rs-elements | xargs -n1 gst-inspect-1.0 > /dev/null && \
+    rm -rf /root/.cache
 
 ARG TARGETPLATFORM
+
+# Our GStreamer build is not owned by any package, so distro GStreamer packages
+# (a pulseaudio dependency) would overwrite its files. Keep dpkg from writing them.
+# The distro helper directory stays: libgstreamer1.0-0's postinst fails without gst-ptp-helper.
+RUN printf '%s\n' \
+        'path-exclude=/usr/lib/*/gstreamer-1.0/*' \
+        'path-exclude=/usr/lib/*/libgst*' \
+        'path-include=/usr/lib/*/gstreamer1.0/*' \
+    > /etc/dpkg/dpkg.cfg.d/exclude-distro-gstreamer
 
 # install deps, pulling in security updates from the base image.
 # SECURITY_REFRESH busts the cache so the upgrade re-runs on every build.
@@ -140,20 +169,27 @@ ENV PATH="/usr/local/go/bin:${PATH}"
 ENV GOTOOLCHAIN=local
 
 # install chrome
-COPY --from=livekit/chrome-installer:150.0.7871.46 /chrome-installer /chrome-installer
+COPY --from=livekit/chrome-installer:156.0.8078.47 /chrome-installer /chrome-installer
 
 RUN /chrome-installer/install-chrome "$TARGETPLATFORM"
+
+# fail the build if the core elements are not from our GStreamer build
+ARG GSTVERSION
+RUN gst-inspect-1.0 coreelements | grep -q "Version *${GSTVERSION%-*}$" || \
+    { echo "coreelements is not GStreamer ${GSTVERSION%-*}" >&2; exit 1; }
 
 # clean up
 RUN rm -rf /var/lib/apt/lists/*
 
-# install rtsp server
+# install rtsp server. %path in recordPath keeps each stream key in its own
+# directory, so the integration suite can find the recording for a given output
+# url; test/stream_recording.go reads from the same location.
 RUN if [ "$TARGETPLATFORM" = "linux/arm64" ]; then ARCH=arm64v8; else ARCH=amd64; fi && \
     wget https://github.com/bluenviron/mediamtx/releases/download/v1.8.1/mediamtx_v1.8.1_linux_${ARCH}.tar.gz && \
     tar -zxvf mediamtx_v1.8.1_linux_${ARCH}.tar.gz && \
     rm mediamtx_v1.8.1_linux_${ARCH}.tar.gz && \
     sed -i 's_record: no_record: yes_g' mediamtx.yml && \
-    sed -i 's_recordPath: ./recordings/%path/_recordPath: /out/output/stream-_g' mediamtx.yml
+    sed -i 's_recordPath: ./recordings/%path/_recordPath: /out/output/rec/%path/_g' mediamtx.yml
 
 # install toxiproxy (used by integration tests to simulate wedged RTMP outputs)
 RUN if [ "$TARGETPLATFORM" = "linux/arm64" ]; then ARCH=arm64; else ARCH=amd64; fi && \

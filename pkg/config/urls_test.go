@@ -15,6 +15,8 @@
 package config
 
 import (
+	"errors"
+	"net/http"
 	"regexp"
 	"strings"
 	"testing"
@@ -87,7 +89,7 @@ func TestGetUrl(t *testing.T) {
 	}
 
 	for _, url := range []string{urls[0], urls[1], urls[3]} {
-		_, err := o.AddStream(url, types.OutputTypeRTMP)
+		_, err := o.AddStream("", url, types.OutputTypeRTMP)
 		require.NoError(t, err)
 	}
 
@@ -128,7 +130,7 @@ func TestStreamTag(t *testing.T) {
 	require.Equal(t, "rtmps://global-live.mux.com:443/app/{str...key}#ov-stream-tag=mux_1", redacted)
 
 	// a tagged url finds the stream it added, with or without its tag
-	_, err = o.AddStream("rtmp://localhost:1935/live/taggedkey#ov-stream-tag=t1", types.OutputTypeRTMP)
+	_, err = o.AddStream("", "rtmp://localhost:1935/live/taggedkey#ov-stream-tag=t1", types.OutputTypeRTMP)
 	require.NoError(t, err)
 	for _, rawUrl := range []string{"rtmp://localhost:1935/live/taggedkey#ov-stream-tag=t1", "rtmp://localhost:1935/live/taggedkey"} {
 		stream, err := o.GetStream(rawUrl)
@@ -136,6 +138,10 @@ func TestStreamTag(t *testing.T) {
 		require.Equal(t, "rtmp://localhost:1935/live/taggedkey", stream.ParsedUrl)
 		require.Equal(t, "rtmp://localhost:1935/live/{tag...key}#ov-stream-tag=t1", stream.StreamInfo.Url)
 	}
+
+	// the same url is streamed to once at a time, whatever its tag
+	_, err = o.AddStream("", "rtmp://localhost:1935/live/taggedkey#ov-stream-tag=t2", types.OutputTypeRTMP)
+	require.ErrorContains(t, err, "duplicate stream url")
 
 	// a malformed tag is refused without showing the stream key
 	for _, rawUrl := range []string{
@@ -150,3 +156,74 @@ func TestStreamTag(t *testing.T) {
 }
 
 // END OPENVIDU BLOCK
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+func TestTwitchEndpointWithoutIngestList(t *testing.T) {
+	transport := http.DefaultTransport
+	http.DefaultTransport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("ingest list unavailable")
+	})
+	t.Cleanup(func() { http.DefaultTransport = transport })
+
+	o := &StreamConfig{}
+	rawUrl := "rtmp://fake.contribute.live-video.net/app/streamkey"
+
+	parsed, redacted, streamID, err := o.ValidateUrl(rawUrl, types.OutputTypeRTMP)
+	require.NoError(t, err)
+	require.Equal(t, rawUrl, parsed)
+	require.Equal(t, "rtmp://fake.contribute.live-video.net/app/{str...key}", redacted)
+	require.Equal(t, "streamkey", streamID)
+
+	_, err = o.AddStream("", rawUrl, types.OutputTypeRTMP)
+	require.NoError(t, err)
+
+	stream, err := o.GetStream(rawUrl)
+	require.NoError(t, err)
+	require.Equal(t, rawUrl, stream.ParsedUrl)
+}
+
+func TestTwitchStreamAddedBeforeIngestListRecovers(t *testing.T) {
+	transport := http.DefaultTransport
+	t.Cleanup(func() { http.DefaultTransport = transport })
+
+	http.DefaultTransport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("ingest list unavailable")
+	})
+
+	o := &StreamConfig{}
+	rawUrl := "rtmp://fake.contribute.live-video.net/app/streamkey"
+	_, err := o.AddStream("", rawUrl, types.OutputTypeRTMP)
+	require.NoError(t, err)
+
+	// the ingest list recovers after the stream was added
+	o.twitchTemplate = "rtmps://other.contribute.live-video.net/app/{stream_key}"
+
+	stream, err := o.GetStream(rawUrl)
+	require.NoError(t, err)
+	require.Equal(t, rawUrl, stream.ParsedUrl)
+}
+
+func TestTwitchDuplicateStreamAfterIngestListRecovers(t *testing.T) {
+	transport := http.DefaultTransport
+	t.Cleanup(func() { http.DefaultTransport = transport })
+
+	http.DefaultTransport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("ingest list unavailable")
+	})
+
+	o := &StreamConfig{}
+	rawUrl := "rtmp://fake.contribute.live-video.net/app/streamkey"
+	_, err := o.AddStream("", rawUrl, types.OutputTypeRTMP)
+	require.NoError(t, err)
+
+	// the ingest list recovers after the stream was added
+	o.twitchTemplate = "rtmps://other.contribute.live-video.net/app/{stream_key}"
+
+	_, err = o.AddStream("", rawUrl, types.OutputTypeRTMP)
+	require.Error(t, err)
+}

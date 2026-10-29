@@ -12,11 +12,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# The GStreamer version is pinned in .gst-version, the single source of truth that
+# Renovate keeps current via an approvable PR. It has no default here on purpose: a
+# default would be a second copy of the version and would drift. The magefile and CI
+# read the file and pass it in, so build this by hand with
+# --build-arg GSTVERSION=$(cat .gst-version).
+ARG GSTVERSION
+
 ARG TEMPLATE_TAG=latest
 
 FROM livekit/egress-templates:$TEMPLATE_TAG AS template
 
-FROM livekit/gstreamer:1.24.12-dev
+FROM livekit/gstreamer:$GSTVERSION-dev
 
 ARG TARGETPLATFORM
 ARG TARGETARCH
@@ -70,7 +77,20 @@ ENV TINI_VERSION v0.19.0
 ADD https://github.com/krallin/tini/releases/download/${TINI_VERSION}/tini-${TARGETARCH} /tini
 RUN chmod +x /tini
 
-FROM livekit/gstreamer:1.24.12-prod
+FROM livekit/gstreamer:$GSTVERSION-prod-rs AS rs-plugins
+
+RUN --mount=type=bind,source=build/egress,target=/build \
+    /build/copy-rs-plugins /build/egress-rs-elements /rs-plugins
+
+FROM livekit/gstreamer:$GSTVERSION-prod
+
+# gst-plugins-rs plugins listed in build/egress/egress-rs-elements
+COPY --from=rs-plugins /rs-plugins/ /
+
+# fail the build if a listed element does not load in this image
+RUN --mount=type=bind,source=build/egress/egress-rs-elements,target=/egress-rs-elements \
+    grep -v -e '^#' -e '^$' /egress-rs-elements | xargs -n1 gst-inspect-1.0 > /dev/null && \
+    rm -rf /root/.cache
 
 # BEGIN OPENVIDU BLOCK
 # Install timezone data support
@@ -80,6 +100,15 @@ RUN DEBIAN_FRONTEND=noninteractive apt-get update && \
 # END OPENVIDU BLOCK
 
 ARG TARGETPLATFORM
+
+# Our GStreamer build is not owned by any package, so distro GStreamer packages
+# (a pulseaudio dependency) would overwrite its files. Keep dpkg from writing them.
+# The distro helper directory stays: libgstreamer1.0-0's postinst fails without gst-ptp-helper.
+RUN printf '%s\n' \
+        'path-exclude=/usr/lib/*/gstreamer-1.0/*' \
+        'path-exclude=/usr/lib/*/libgst*' \
+        'path-include=/usr/lib/*/gstreamer1.0/*' \
+    > /etc/dpkg/dpkg.cfg.d/exclude-distro-gstreamer
 
 # install deps, pulling in security updates from the base image.
 # SECURITY_REFRESH busts the cache so the upgrade re-runs on every build.
@@ -97,7 +126,7 @@ RUN apt-get update && \
     gstreamer1.0-plugins-base-
 
 # install chrome
-COPY --from=livekit/chrome-installer:150.0.7871.46 /chrome-installer /chrome-installer
+COPY --from=livekit/chrome-installer:156.0.8078.47 /chrome-installer /chrome-installer
 
 RUN /chrome-installer/install-chrome "$TARGETPLATFORM"
 
@@ -106,6 +135,11 @@ RUN /chrome-installer/install-chrome "$TARGETPLATFORM"
 COPY build/egress/chrome-policy.json /etc/opt/chrome/policies/managed/openvidu.json
 COPY build/egress/chrome-policy.json /etc/chromium/policies/managed/openvidu.json
 # END OPENVIDU BLOCK
+
+# fail the build if the core elements are not from our GStreamer build
+ARG GSTVERSION
+RUN gst-inspect-1.0 coreelements | grep -q "Version *${GSTVERSION%-*}$" || \
+    { echo "coreelements is not GStreamer ${GSTVERSION%-*}" >&2; exit 1; }
 
 # clean up
 RUN rm -rf /var/lib/apt/lists/*
@@ -130,4 +164,4 @@ ENV PATH=${PATH}:/chrome
 ENV XDG_RUNTIME_DIR=/home/egress/.cache/xdgr
 ENV CHROME_DEVEL_SANDBOX=/usr/local/sbin/chrome-devel-sandbox
 
-ENTRYPOINT ["/entrypoint.sh"]
+ENTRYPOINT ["/tini", "--", "/entrypoint.sh"]

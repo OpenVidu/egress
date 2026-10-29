@@ -33,7 +33,6 @@ import (
 	"github.com/livekit/psrpc"
 
 	"github.com/livekit/egress/pkg/config"
-	"github.com/livekit/egress/pkg/errors"
 	"github.com/livekit/egress/pkg/info"
 	"github.com/livekit/egress/pkg/ipc"
 	"github.com/livekit/egress/pkg/service"
@@ -73,11 +72,6 @@ func NewServer(conf *config.ServiceConfig, bus psrpc.MessageBus, ioClient info.S
 		ipcServiceServer: grpc.NewServer(),
 		ioClient:         ioClient,
 	}
-
-	ioClient.SetWatchdogHandler(func() {
-		logger.Errorw("shutting down server on io client watchdog trigger", errors.New("io client failure"))
-		s.Shutdown(false, false)
-	})
 
 	monitor, err := stats.NewMonitor(conf, s)
 	if err != nil {
@@ -171,6 +165,7 @@ func (s *Server) Run() error {
 func (s *Server) Status() ([]byte, error) {
 	status := map[string]interface{}{
 		"CpuLoad": s.monitor.GetAvailableCPU(),
+		"NodeId":  s.conf.NodeID,
 	}
 	s.GetStatus(status)
 	return json.Marshal(status)
@@ -181,7 +176,7 @@ func (s *Server) IsIdle() bool {
 }
 
 func (s *Server) IsDisabled() bool {
-	return s.shutdown.IsBroken() || !s.ioClient.IsHealthy()
+	return s.shutdown.IsBroken()
 }
 
 func (s *Server) IsTerminating() bool {

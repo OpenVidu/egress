@@ -70,6 +70,7 @@ type Monitor struct {
 	nodeID             string
 	clusterID          string
 	cpuCostConfig      *config.CPUCostConfig
+	baseConfig         *config.BaseConfig
 	pulseSinkReapGrace atomic.Duration
 
 	promCPULoad           prometheus.Gauge
@@ -133,6 +134,7 @@ func NewMonitor(conf *config.ServiceConfig, svc Service) (*Monitor, error) {
 		nodeID:             conf.NodeID,
 		clusterID:          conf.ClusterID,
 		cpuCostConfig:      conf.CPUCostConfig,
+		baseConfig:         &conf.BaseConfig,
 		svc:                svc,
 		pending:            make(map[string]*processStats),
 		procStats:          make(map[int]*processStats),
@@ -311,7 +313,7 @@ func (m *Monitor) costsForRequest(req *rpc.StartEgressRequest) requestCosts {
 
 	setV2Costs := func(request v2Request) {
 		if template := request.GetTemplate(); template != nil {
-			costs.isWeb = !config.ShouldUseSDKSource(template)
+			costs.isWeb = !m.baseConfig.TemplateSourceIsSDK(template)
 			if template.AudioOnly {
 				if costs.isWeb {
 					costs.cpu = m.cpuCostConfig.AudioRoomCompositeCpuCost
@@ -329,18 +331,24 @@ func (m *Monitor) costsForRequest(req *rpc.StartEgressRequest) requestCosts {
 			} else {
 				costs.cpu = m.cpuCostConfig.WebCpuCost
 			}
-		} else if request.GetMedia() != nil {
-			if request.GetPreset() == livekit.EncodingOptionsPreset_PASSTHROUGH {
+		} else if media := request.GetMedia(); media != nil {
+			switch {
+			case request.GetPreset() == livekit.EncodingOptionsPreset_PASSTHROUGH:
 				costs.cpu = m.cpuCostConfig.TrackCpuCost
-			} else {
+			case media.GetVideo() == nil:
+				costs.cpu = m.cpuCostConfig.SDKAudioRoomCompositeCpuCost
+				costs.memory = m.cpuCostConfig.SDKAudioRoomCompositeMemoryCost
+			case media.GetParticipantVideo() != nil:
 				costs.cpu = m.cpuCostConfig.ParticipantCpuCost
+			default:
+				costs.cpu = m.cpuCostConfig.TrackCompositeCpuCost
 			}
 		}
 	}
 
 	switch r := req.Request.(type) {
 	case *rpc.StartEgressRequest_RoomComposite:
-		costs.isWeb = !config.ShouldUseSDKSource(r.RoomComposite)
+		costs.isWeb = !m.baseConfig.TemplateSourceIsSDK(r.RoomComposite)
 		if r.RoomComposite.AudioOnly {
 			if costs.isWeb {
 				costs.cpu = m.cpuCostConfig.AudioRoomCompositeCpuCost
@@ -496,15 +504,15 @@ func (m *Monitor) UpdatePID(egressID string, pid int) {
 func (m *Monitor) EgressStarted(req *rpc.StartEgressRequest) {
 	switch r := req.Request.(type) {
 	case *rpc.StartEgressRequest_RoomComposite:
-		m.requestGauge.With(prometheus.Labels{"type": types.RequestTypeRoomComposite}).Add(1)
+		m.requestGauge.With(prometheus.Labels{labelType: types.RequestTypeRoomComposite}).Add(1)
 	case *rpc.StartEgressRequest_Web:
-		m.requestGauge.With(prometheus.Labels{"type": types.RequestTypeWeb}).Add(1)
+		m.requestGauge.With(prometheus.Labels{labelType: types.RequestTypeWeb}).Add(1)
 	case *rpc.StartEgressRequest_Participant:
-		m.requestGauge.With(prometheus.Labels{"type": types.RequestTypeParticipant}).Add(1)
+		m.requestGauge.With(prometheus.Labels{labelType: types.RequestTypeParticipant}).Add(1)
 	case *rpc.StartEgressRequest_TrackComposite:
-		m.requestGauge.With(prometheus.Labels{"type": types.RequestTypeTrackComposite}).Add(1)
+		m.requestGauge.With(prometheus.Labels{labelType: types.RequestTypeTrackComposite}).Add(1)
 	case *rpc.StartEgressRequest_Track:
-		m.requestGauge.With(prometheus.Labels{"type": types.RequestTypeTrack}).Add(1)
+		m.requestGauge.With(prometheus.Labels{labelType: types.RequestTypeTrack}).Add(1)
 	case *rpc.StartEgressRequest_Replay:
 		m.egressStarted(r.Replay)
 	case *rpc.StartEgressRequest_Egress:
@@ -513,7 +521,7 @@ func (m *Monitor) EgressStarted(req *rpc.StartEgressRequest) {
 }
 
 func (m *Monitor) egressStarted(request v2Request) {
-	m.requestGauge.With(prometheus.Labels{"type": requestTypeFromInterface(request)}).Add(1)
+	m.requestGauge.With(prometheus.Labels{labelType: requestTypeFromInterface(request)}).Add(1)
 }
 
 func (m *Monitor) EgressAborted(req *rpc.StartEgressRequest) {
@@ -554,19 +562,19 @@ func (m *Monitor) EgressEnded(req *rpc.StartEgressRequest) (float64, float64, in
 
 	switch r := req.Request.(type) {
 	case *rpc.StartEgressRequest_RoomComposite:
-		m.requestGauge.With(prometheus.Labels{"type": types.RequestTypeRoomComposite}).Sub(1)
+		m.requestGauge.With(prometheus.Labels{labelType: types.RequestTypeRoomComposite}).Sub(1)
 		if countedAsWeb {
 			m.webRequests.Dec()
 		}
 	case *rpc.StartEgressRequest_Web:
-		m.requestGauge.With(prometheus.Labels{"type": types.RequestTypeWeb}).Sub(1)
+		m.requestGauge.With(prometheus.Labels{labelType: types.RequestTypeWeb}).Sub(1)
 		m.webRequests.Dec()
 	case *rpc.StartEgressRequest_Participant:
-		m.requestGauge.With(prometheus.Labels{"type": types.RequestTypeParticipant}).Sub(1)
+		m.requestGauge.With(prometheus.Labels{labelType: types.RequestTypeParticipant}).Sub(1)
 	case *rpc.StartEgressRequest_TrackComposite:
-		m.requestGauge.With(prometheus.Labels{"type": types.RequestTypeTrackComposite}).Sub(1)
+		m.requestGauge.With(prometheus.Labels{labelType: types.RequestTypeTrackComposite}).Sub(1)
 	case *rpc.StartEgressRequest_Track:
-		m.requestGauge.With(prometheus.Labels{"type": types.RequestTypeTrack}).Sub(1)
+		m.requestGauge.With(prometheus.Labels{labelType: types.RequestTypeTrack}).Sub(1)
 	case *rpc.StartEgressRequest_Replay:
 		m.egressEnded(r.Replay, countedAsWeb)
 	case *rpc.StartEgressRequest_Egress:
@@ -587,7 +595,7 @@ func (m *Monitor) EgressEnded(req *rpc.StartEgressRequest) (float64, float64, in
 }
 
 func (m *Monitor) egressEnded(request v2Request, countedAsWeb bool) {
-	m.requestGauge.With(prometheus.Labels{"type": requestTypeFromInterface(request)}).Sub(1)
+	m.requestGauge.With(prometheus.Labels{labelType: requestTypeFromInterface(request)}).Sub(1)
 
 	switch {
 	case request.GetTemplate() != nil:
@@ -929,19 +937,28 @@ func (m *Monitor) checkMemoryKill(maxMemoryEgress string, maxMemoryGroup *hwstat
 		}
 		if time.Since(m.highMemoryStart) >= time.Duration(m.cpuCostConfig.MemoryKillGraceSec)*time.Second {
 			killTriggerGB := float64(killTriggerBytes) / gb
+			m.highMemoryStart = time.Time{}
+			if maxMemoryGroup == nil {
+				logger.Errorw("memory over limit with no handler to kill", errors.ErrOOM(killTriggerGB),
+					"source", m.cpuCostConfig.MemorySource,
+					"memoryGB", killTriggerGB,
+					"maxMemoryGB", m.cpuCostConfig.MaxMemory,
+					"requests", m.requests.Load(),
+					"hint", "usage is not from egress handlers: check the memory source scope or the service process",
+				)
+				return
+			}
 			logger.Warnw("high memory usage", nil,
 				"source", m.cpuCostConfig.MemorySource,
 				"memoryGB", killTriggerGB,
 				"maxMemoryGB", m.cpuCostConfig.MaxMemory,
 				"requests", m.requests.Load(),
+				"egressID", maxMemoryEgress,
 			)
-			if maxMemoryGroup != nil {
-				logger.Infow("killing egress process memory",
-					"egressID", maxMemoryEgress, "processes", maxMemoryGroup.Procs)
-			}
+			logger.Infow("killing egress process memory",
+				"egressID", maxMemoryEgress, "processes", maxMemoryGroup.Procs)
 			// Report the actual memory that triggered the kill, not per-process max
 			m.svc.KillProcess(maxMemoryEgress, ResultKilledOOM, errors.ErrOOM(killTriggerGB))
-			m.highMemoryStart = time.Time{}
 		}
 	} else {
 		m.highMemoryStart = time.Time{}

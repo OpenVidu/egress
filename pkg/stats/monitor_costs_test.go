@@ -39,6 +39,7 @@ func TestCostsForRequest(t *testing.T) {
 			TrackCpuCost:                    0.2,
 			MemoryCost:                      3,
 		},
+		baseConfig: &config.BaseConfig{},
 	}
 
 	roomComposite := func(r *livekit.RoomCompositeEgressRequest) *rpc.StartEgressRequest {
@@ -48,6 +49,13 @@ func TestCostsForRequest(t *testing.T) {
 		return &rpc.StartEgressRequest{Request: &rpc.StartEgressRequest_Egress{
 			Egress: &livekit.StartEgressRequest{Source: &livekit.StartEgressRequest_Template{Template: tmpl}},
 		}}
+	}
+	v2Media := func(media *livekit.MediaSource, preset livekit.EncodingOptionsPreset) *rpc.StartEgressRequest {
+		egressReq := &livekit.StartEgressRequest{Source: &livekit.StartEgressRequest_Media{Media: media}}
+		if preset != 0 {
+			egressReq.Encoding = &livekit.StartEgressRequest_Preset{Preset: preset}
+		}
+		return &rpc.StartEgressRequest{Request: &rpc.StartEgressRequest_Egress{Egress: egressReq}}
 	}
 
 	for _, tc := range []struct {
@@ -140,11 +148,42 @@ func TestCostsForRequest(t *testing.T) {
 			cpu: 4.5, memory: 3, isWeb: true,
 		},
 		{
-			name: "v2 media",
-			req: &rpc.StartEgressRequest{Request: &rpc.StartEgressRequest_Egress{
-				Egress: &livekit.StartEgressRequest{Source: &livekit.StartEgressRequest_Media{Media: &livekit.MediaSource{}}},
-			}},
+			name: "v2 media audio only",
+			req:  v2Media(&livekit.MediaSource{}, 0),
+			cpu:  0.5, memory: 1, isWeb: false,
+		},
+		{
+			name: "v2 media audio only passthrough",
+			req:  v2Media(&livekit.MediaSource{}, livekit.EncodingOptionsPreset_PASSTHROUGH),
+			cpu:  0.2, memory: 3, isWeb: false,
+		},
+		{
+			name: "v2 media participant video",
+			req: v2Media(&livekit.MediaSource{
+				Video: &livekit.MediaSource_ParticipantVideo{ParticipantVideo: &livekit.ParticipantVideo{Identity: "alice"}},
+			}, 0),
 			cpu: 2, memory: 3, isWeb: false,
+		},
+		{
+			name: "v2 media video track",
+			req:  v2Media(&livekit.MediaSource{Video: &livekit.MediaSource_VideoTrackId{VideoTrackId: "TR_video"}}, 0),
+			cpu:  2.5, memory: 3, isWeb: false,
+		},
+		{
+			name: "v2 media video track passthrough",
+			req: v2Media(&livekit.MediaSource{
+				Video: &livekit.MediaSource_VideoTrackId{VideoTrackId: "TR_video"},
+			}, livekit.EncodingOptionsPreset_PASSTHROUGH),
+			cpu: 0.2, memory: 3, isWeb: false,
+		},
+		{
+			name: "v2 replay media audio only",
+			req: &rpc.StartEgressRequest{Request: &rpc.StartEgressRequest_Replay{
+				Replay: &livekit.ExportReplayRequest{
+					Source: &livekit.ExportReplayRequest_Media{Media: &livekit.MediaSource{}},
+				},
+			}},
+			cpu: 0.5, memory: 1, isWeb: false,
 		},
 		{
 			name: "v2 replay template audio sdk",

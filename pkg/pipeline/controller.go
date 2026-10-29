@@ -30,6 +30,8 @@ import (
 	"go.uber.org/atomic"
 	"go.uber.org/zap"
 
+	"go.opentelemetry.io/otel"
+
 	"github.com/livekit/egress/pkg/config"
 	"github.com/livekit/egress/pkg/errors"
 	"github.com/livekit/egress/pkg/gstreamer"
@@ -42,7 +44,6 @@ import (
 	"github.com/livekit/protocol/livekit"
 	"github.com/livekit/protocol/logger"
 	"github.com/livekit/psrpc"
-	"go.opentelemetry.io/otel"
 )
 
 const (
@@ -51,8 +52,11 @@ const (
 	streamRetryUpdateInterval = time.Minute
 )
 
-// var to allow tests to shorten it
-var eosTimeout = time.Second * 30
+// vars to allow tests to shorten them
+var (
+	eosTimeout     = time.Second * 30
+	prerollTimeout = time.Second * 30
+)
 
 type Controller struct {
 	*config.PipelineConfig
@@ -213,7 +217,13 @@ func (c *Controller) BuildPipeline() error {
 		}
 	}
 	if c.VideoEnabled {
-		if err = builder.BuildVideoBin(p, c.PipelineConfig); err != nil {
+		var setDims func(string, int, int)
+		if c.Compositing {
+			if sdkSrc, ok := c.src.(*source.SDKSource); ok {
+				setDims = sdkSrc.UpdateTrackDimensions
+			}
+		}
+		if err = builder.BuildVideoBin(p, c.PipelineConfig, setDims); err != nil {
 			return err
 		}
 	}
@@ -277,10 +287,7 @@ func (c *Controller) Run(ctx context.Context) *livekit.EgressInfo {
 	c.startSessionLimitTimer(ctx)
 
 	// close when room ends
-	go func() {
-		<-c.src.EndRecording()
-		c.SendEOS(ctx, livekit.EndReasonSrcClosed)
-	}()
+	go c.watchEndRecording(ctx)
 
 	// wait until room is ready
 	start := c.src.StartRecording()
@@ -317,6 +324,8 @@ func (c *Controller) Run(ctx context.Context) *livekit.EgressInfo {
 			if err := s.Start(); err != nil {
 				c.src.Close()
 				c.Info.SetFailed(err)
+				// nothing else stops the pipeline here, and a non-live watchEndRecording parks on stopped
+				go c.p.Stop()
 				return c.Info
 			}
 		}
@@ -335,6 +344,7 @@ func (c *Controller) Run(ctx context.Context) *livekit.EgressInfo {
 	if err != nil {
 		c.src.Close()
 		c.Info.SetFailed(err)
+		go c.p.Stop()
 		return c.Info
 	}
 
@@ -367,6 +377,25 @@ func (c *Controller) Run(ctx context.Context) *livekit.EgressInfo {
 	return c.Info
 }
 
+// a non-live source can finish before PLAYING, where SendEOS aborts a healthy egress
+func (c *Controller) watchEndRecording(ctx context.Context) {
+	<-c.src.EndRecording()
+
+	if !c.Live {
+		select {
+		// the fuse releases only after the status has left STARTING, so SendEOS can't abort
+		case <-c.playing.Watch():
+		// Close still sets the aborted status, and SendEOS has nothing left to stop
+		case <-c.stopped.Watch():
+			return
+		case <-time.After(prerollTimeout):
+			logger.Warnw("non-live pipeline did not reach playing", nil, "timeout", prerollTimeout)
+		}
+	}
+
+	c.SendEOS(ctx, livekit.EndReasonSrcClosed)
+}
+
 func (c *Controller) UpdateStream(ctx context.Context, req *livekit.UpdateStreamRequest) error {
 	ctx, span := tracer.Start(ctx, "Pipeline.UpdateStream")
 	defer span.End()
@@ -380,31 +409,20 @@ func (c *Controller) UpdateStream(ctx context.Context, req *livekit.UpdateStream
 
 	// add stream outputs first
 	for _, rawUrl := range req.AddOutputUrls {
-		// validate and redact url
-		stream, err := o.AddStream(rawUrl, o.OutputType)
+		stream, err := o.AddStream("", rawUrl, o.OutputType)
 		if err != nil {
 			errs.AppendErr(err)
 			continue
 		}
-
-		// add stream info to results
-		c.mu.Lock()
-		c.Info.StreamResults = append(c.Info.StreamResults, stream.StreamInfo)
-		if list := c.Info.GetStream(); list != nil { //nolint:staticcheck // keep deprecated field for older clients
-			list.Info = append(list.Info, stream.StreamInfo)
-		}
-		c.mu.Unlock()
-
-		// add stream
-		if err = c.getStreamSink().AddStream(stream); err != nil {
-			stream.StreamInfo.Status = livekit.StreamInfo_FAILED
-			stream.StreamInfo.Error = err.Error()
-			stream.UpdateEndTime(time.Now().UnixNano())
+		c.addStream(stream, &errs)
+	}
+	for _, d := range req.AddDestinations {
+		stream, err := o.AddDestination(d, o.OutputType)
+		if err != nil {
 			errs.AppendErr(err)
 			continue
 		}
-
-		c.OutputCount.Inc()
+		c.addStream(stream, &errs)
 	}
 
 	// remove stream outputs
@@ -422,6 +440,26 @@ func (c *Controller) UpdateStream(ctx context.Context, req *livekit.UpdateStream
 
 	c.streamUpdated(ctx)
 	return errs.ToError()
+}
+
+func (c *Controller) addStream(stream *config.Stream, errs *errors.ErrArray) {
+	c.mu.Lock()
+	c.Info.StreamResults = append(c.Info.StreamResults, stream.StreamInfo)
+	if list := c.Info.GetStream(); list != nil { //nolint:staticcheck // keep deprecated field for older clients
+		list.Info = append(list.Info, stream.StreamInfo)
+	}
+	c.mu.Unlock()
+
+	if err := c.getStreamSink().AddStream(stream); err != nil {
+		stream.StreamInfo.Status = livekit.StreamInfo_FAILED
+		stream.StreamInfo.Error = err.Error()
+		stream.UpdateEndTime(time.Now().UnixNano())
+		c.GetStreamConfig().Streams.Delete(stream.ParsedUrl)
+		errs.AppendErr(err)
+		return
+	}
+
+	c.OutputCount.Inc()
 }
 
 func (c *Controller) streamFinished(ctx context.Context, stream *config.Stream) error {
@@ -501,6 +539,10 @@ func (c *Controller) onEOSSent() {
 	// for video-only track/track composite, EOS might have already
 	// made it through the pipeline by the time endRecording is closed
 	if (c.Passthrough || c.RequestType == types.RequestTypeTrackComposite) && !c.AudioEnabled {
+		// watchEndRecording sends it once playing; sending here would abort a STARTING egress
+		if !c.Live && !c.playing.IsBroken() {
+			return
+		}
 		// this will not actually send a second EOS, but will make sure everything is in the correct state
 		c.SendEOS(context.Background(), livekit.EndReasonSrcClosed)
 	}
