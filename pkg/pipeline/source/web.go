@@ -290,6 +290,10 @@ func (s *WebSource) launchChrome(ctx context.Context, p *config.PipelineConfig) 
 		chromedp.Flag("no-first-run", true),
 		chromedp.Flag("no-default-browser-check", true),
 		chromedp.Flag("host-resolver-rules", "MAP accounts.google.com ~NOTFOUND, MAP mtalk.google.com ~NOTFOUND, MAP android.clients.google.com ~NOTFOUND"),
+		// chromedp gives chrome 20 s to print its DevTools address, after which the web egress
+		// fails with "websocket url timeout reached". The first chrome launch of an egress reads
+		// chrome from disk, and on a slow or busy disk that alone takes about 20 s.
+		chromedp.WSURLReadTimeout(60 * time.Second),
 		// END OPENVIDU BLOCK
 
 		// custom args

@@ -21,6 +21,14 @@ mkdir -p /home/egress/backup_storage || true
 if [ -d /home/egress/tmp ]; then
     find /home/egress/tmp -maxdepth 1 -type d -name 'EG_*' -exec cp -r {} /home/egress/backup_storage/ \; 2>/dev/null || true
 fi
+
+# Read chrome into the page cache in the background, at the lowest CPU and I/O priority. Its first
+# launch then reads ~10 MB from disk instead of ~200 MB, which on a slow or busy disk takes ~20 s and
+# delays the first web egress. It waits 5 s so that it does not slow down the egress's own startup,
+# and the subshell leaves it to tini, which reaps it.
+if [ -d /opt/google/chrome ]; then
+    (sleep 5 && nice -n 19 ionice -c3 find /opt/google/chrome -type f -exec cat {} + > /dev/null 2>&1 &)
+fi
 # END OPENVIDU BLOCK
 
 # Clean out tmp
