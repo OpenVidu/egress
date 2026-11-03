@@ -43,7 +43,7 @@ export default function RoomPage({ url, token, layout }: RoomPageProps) {
   }
 
   return (
-    <LiveKitRoom serverUrl={url} token={token} onError={setError}>
+    <LiveKitRoom serverUrl={url} token={token} options={{ adaptiveStream: true }} onError={setError}>
       {error ? <div className="error">{error.message}</div> : <CompositeTemplate layout={layout} />}
     </LiveKitRoom>
   );
