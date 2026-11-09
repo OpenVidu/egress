@@ -3,7 +3,7 @@ module github.com/livekit/egress
 replace github.com/go-gst/go-gst => github.com/livekit/gst-go v0.0.0-20261015120717-e0fc4e6af2ac
 
 // BEGIN OPENVIDU BLOCK
-replace github.com/livekit/storage => github.com/OpenVidu/storage v0.0.0-20261029102500-78584f6b2c61
+replace github.com/livekit/storage => github.com/OpenVidu/storage v0.0.0-20261109102750-86adf6bbe759
 
 // END OPENVIDU BLOCK
 
@@ -17,8 +17,9 @@ require (
 	github.com/OpenVidu/openvidu-golang-utils v1.0.0
 	github.com/Shopify/toxiproxy/v2 v2.12.0
 	github.com/aws/smithy-go v1.28.5
-	github.com/chromedp/cdproto v0.0.0-20260804232424-e85f50dbfd32
-	github.com/chromedp/chromedp v0.16.0
+	github.com/chromedp/cdproto v0.158.4
+	github.com/chromedp/chromedp v0.21.0
+	github.com/foxglove/mcap/go/mcap v1.9.0
 	github.com/frostbyte73/core v0.1.1
 	github.com/go-gst/go-glib v1.4.1-0.20250303082535-35ebad1471fd
 	github.com/go-gst/go-gst v1.4.0
@@ -27,22 +28,22 @@ require (
 	github.com/livekit/go-rtmp v0.0.0-20261019042323-a9bd9ffaba6f
 	github.com/livekit/livekit-server v1.13.11
 	github.com/livekit/mageutil v0.0.0-20250511045019-0f1ff63f7731
-	github.com/livekit/media-samples/avsync v0.0.0-20261008082729-48c99b65fa6d
+	github.com/livekit/media-samples/avsync v0.0.0-20261030142945-16e8865b2517
 	github.com/livekit/media-sdk v0.1.1
-	github.com/livekit/mediatransportutil v0.0.0-20261020100523-e0b22b120fb1
-	github.com/livekit/protocol v1.53.1-0.20261023205916-b20af9b45249
+	github.com/livekit/mediatransportutil v0.0.0-20261031130836-5b63b1f53a6c
+	github.com/livekit/protocol v1.53.3-0.20261104162546-4f5a18f3bdb3
 	github.com/livekit/psrpc v0.8.2
-	github.com/livekit/server-sdk-go/v2 v2.19.1-0.20261021005524-743ab2d6b12f
-	github.com/livekit/storage v0.0.0-20261023160903-126285636eee
+	github.com/livekit/server-sdk-go/v2 v2.19.1-0.20261105164546-002b2715733b
+	github.com/livekit/storage v0.0.0-20261104143719-975a7bf0bc4d
 	github.com/llehouerou/go-mp3 v1.5.0
 	github.com/pbnjay/memory v0.0.0-20210728143218-7b4eea64cf58
 	github.com/pion/rtp v1.10.5
 	github.com/pion/webrtc/v4 v4.2.24
-	github.com/prometheus/client_golang v1.24.1
+	github.com/prometheus/client_golang v1.25.0
 	github.com/prometheus/client_model v0.6.3
-	github.com/prometheus/common v0.72.0
+	github.com/prometheus/common v0.72.1
 	github.com/stretchr/testify v1.12.1
-	github.com/urfave/cli/v3 v3.11.0
+	github.com/urfave/cli/v3 v3.14.0
 	go.opentelemetry.io/otel v1.47.0
 	go.uber.org/atomic v1.12.0
 	go.uber.org/zap v1.28.0
@@ -99,7 +100,6 @@ require (
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/bep/debounce v1.2.1 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
-	github.com/chromedp/sysutil v1.1.0 // indirect
 	github.com/cncf/xds/go v0.0.0-20260202195803-dba9d589def2 // indirect
 	github.com/dennwc/iters v1.2.2 // indirect
 	github.com/elliotchance/orderedmap/v3 v3.1.1 // indirect
@@ -108,15 +108,12 @@ require (
 	github.com/felixge/httpsnoop v1.1.0 // indirect
 	github.com/florianl/go-tc v0.4.8 // indirect
 	github.com/fsnotify/fsnotify v1.10.1 // indirect
-	github.com/gammazero/deque v1.2.1 // indirect
+	github.com/gammazero/deque v1.2.2 // indirect
 	github.com/go-gst/go-pointer v0.0.0-20241127163939-ba766f075b4c // indirect
-	github.com/go-jose/go-jose/v4 v4.1.5 // indirect
+	github.com/go-jose/go-jose/v4 v4.1.6 // indirect
 	github.com/go-json-experiment/json v0.0.0-20260623181947-01eb4420fa68 // indirect
 	github.com/go-logr/logr v1.4.4 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
-	github.com/gobwas/httphead v0.1.0 // indirect
-	github.com/gobwas/pool v0.2.1 // indirect
-	github.com/gobwas/ws v1.4.0 // indirect
 	github.com/goccy/go-json v0.10.6 // indirect
 	github.com/gofrs/flock v0.13.0 // indirect
 	github.com/golang-jwt/jwt/v5 v5.3.1 // indirect
@@ -189,16 +186,16 @@ require (
 	go.uber.org/multierr v1.11.0 // indirect
 	go.uber.org/zap/exp v0.3.0 // indirect
 	go.yaml.in/yaml/v3 v3.0.5 // indirect
-	golang.org/x/crypto v0.57.0 // indirect
-	golang.org/x/exp v0.0.0-20261005173118-76772065c9b0 // indirect
-	golang.org/x/mod v0.41.0 // indirect
-	golang.org/x/net v0.59.0 // indirect
+	golang.org/x/crypto v0.58.0 // indirect
+	golang.org/x/exp v0.0.0-20261014143641-f0251eb4aa3e // indirect
+	golang.org/x/mod v0.42.0 // indirect
+	golang.org/x/net v0.61.0 // indirect
 	golang.org/x/oauth2 v0.37.0 // indirect
 	golang.org/x/sync v0.24.0 // indirect
-	golang.org/x/sys v0.48.0 // indirect
-	golang.org/x/text v0.42.0 // indirect
+	golang.org/x/sys v0.49.0 // indirect
+	golang.org/x/text v0.43.0 // indirect
 	golang.org/x/time v0.16.0 // indirect
-	golang.org/x/tools v0.51.0 // indirect
+	golang.org/x/tools v0.52.0 // indirect
 	google.golang.org/api v0.300.0 // indirect
 	google.golang.org/genproto v0.0.0-20260715232425-e75dac1f907d // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20261005182115-fad411399dd8 // indirect

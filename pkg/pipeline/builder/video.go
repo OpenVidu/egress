@@ -540,17 +540,6 @@ func (b *VideoBin) addAppSrcBin(ts *config.TrackSource) error {
 	return nil
 }
 
-func (b *VideoBin) attachKeyframeProbe(ts *config.TrackSource, name string, element *gst.Element) error {
-	probe, err := newKeyframeProbe(ts.TrackID, ts.MimeType, element, ts.OnKeyframeRequired, ts.OnKeyframeReceived)
-	if err != nil {
-		return err
-	}
-	b.probesMu.Lock()
-	b.probes[name] = probe
-	b.probesMu.Unlock()
-	return nil
-}
-
 func (b *VideoBin) closeProbe(name string) {
 	b.probesMu.Lock()
 	probe, ok := b.probes[name]
@@ -564,74 +553,106 @@ func (b *VideoBin) closeProbe(name string) {
 }
 
 func (b *VideoBin) buildAppSrcBin(ts *config.TrackSource, name string) (*gstreamer.Bin, error) {
-	appSrcBin := b.bin.NewBin(name)
+	appSrcBin, probe, err := buildVideoAppSrcBin(b.bin, b.conf, ts, name, b.conf.VideoDecoding)
+	if err != nil {
+		return nil, err
+	}
+	b.probesMu.Lock()
+	b.probes[name] = probe
+	b.probesMu.Unlock()
+
+	if !b.conf.VideoDecoding {
+		return appSrcBin, nil
+	}
+	if err = b.addVideoConverter(appSrcBin, name, ts.PublicationSource == livekit.TrackSource_SCREEN_SHARE); err != nil {
+		return nil, err
+	}
+	return appSrcBin, nil
+}
+
+// buildVideoAppSrcBin builds appsrc → depay → parse for one track, decoding when decode is set, with a keyframe probe on the parsed stream
+func buildVideoAppSrcBin(parent *gstreamer.Bin, conf *config.PipelineConfig, ts *config.TrackSource, name string, decode bool) (*gstreamer.Bin, *keyframeProbe, error) {
+	appSrcBin := parent.NewBin(name)
 	appSrcBin.SetEOSFunc(func() bool {
 		return false
 	})
 	ts.AppSrc.SetArg("format", "time")
-	if err := ts.AppSrc.SetProperty("is-live", b.conf.Live); err != nil {
-		return nil, errors.ErrGstPipelineError(err)
+	if err := ts.AppSrc.SetProperty("is-live", conf.Live); err != nil {
+		return nil, nil, errors.ErrGstPipelineError(err)
 	}
-	if !b.conf.Live {
+	if !conf.Live {
 		if err := ts.AppSrc.SetProperty("block", true); err != nil {
-			return nil, errors.ErrGstPipelineError(err)
+			return nil, nil, errors.ErrGstPipelineError(err)
 		}
 	}
 	if err := appSrcBin.AddElement(ts.AppSrc.Element); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
+	var probeElement *gst.Element
 	switch ts.MimeType {
 	case types.MimeTypeH264:
 		if err := ts.AppSrc.SetProperty("caps", gst.NewCapsFromString(fmt.Sprintf(
 			"application/x-rtp,media=video,payload=%d,encoding-name=H264,clock-rate=%d",
 			ts.PayloadType, ts.ClockRate,
 		))); err != nil {
-			return nil, errors.ErrGstPipelineError(err)
+			return nil, nil, errors.ErrGstPipelineError(err)
 		}
 
 		rtpH264Depay, err := gst.NewElement("rtph264depay")
 		if err != nil {
-			return nil, errors.ErrGstPipelineError(err)
+			return nil, nil, errors.ErrGstPipelineError(err)
 		}
 
 		caps, err := gst.NewElement("capsfilter")
 		if err != nil {
-			return nil, errors.ErrGstPipelineError(err)
+			return nil, nil, errors.ErrGstPipelineError(err)
 		}
 		if err = caps.SetProperty("caps", gst.NewCapsFromString(
 			"video/x-h264,stream-format=byte-stream",
 		)); err != nil {
-			return nil, errors.ErrGstPipelineError(err)
+			return nil, nil, errors.ErrGstPipelineError(err)
 		}
 
 		if err = appSrcBin.AddElements(rtpH264Depay, caps); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 
 		h264Parse, err := gst.NewElement("h264parse")
 		if err != nil {
-			return nil, errors.ErrGstPipelineError(err)
+			return nil, nil, errors.ErrGstPipelineError(err)
+		}
+		if conf.TrackPreserving() {
+			// SPS/PPS on every IDR lets playback start at any keyframe
+			if err = h264Parse.SetProperty("config-interval", -1); err != nil {
+				return nil, nil, errors.ErrGstPipelineError(err)
+			}
 		}
 		if err = appSrcBin.AddElement(h264Parse); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
+		probeElement = h264Parse
 
-		if err := b.attachKeyframeProbe(ts, name, h264Parse); err != nil {
-			return nil, err
-		}
-
-		if !b.conf.VideoDecoding {
-			return appSrcBin, nil
-		}
-
-		avDecH264, err := gst.NewElement("avdec_h264")
-		if err != nil {
-			return nil, errors.ErrGstPipelineError(err)
-		}
-
-		if err = appSrcBin.AddElement(avDecH264); err != nil {
-			return nil, err
+		if decode {
+			avDecH264, err := gst.NewElement("avdec_h264")
+			if err != nil {
+				return nil, nil, errors.ErrGstPipelineError(err)
+			}
+			if !conf.Live && conf.Compositing {
+				// frame threading holds decoded frames, and a GAP behind them, until the next input
+				avDecH264.SetArg("thread-type", "slice")
+			}
+			if err = appSrcBin.AddElement(avDecH264); err != nil {
+				return nil, nil, err
+			}
+		} else {
+			pixelAspectLock, err := newPixelAspectLock(h264Parse)
+			if err != nil {
+				return nil, nil, err
+			}
+			if err = appSrcBin.AddElement(pixelAspectLock); err != nil {
+				return nil, nil, err
+			}
 		}
 
 	case types.MimeTypeVP8:
@@ -639,30 +660,26 @@ func (b *VideoBin) buildAppSrcBin(ts *config.TrackSource, name string) (*gstream
 			"application/x-rtp,media=video,payload=%d,encoding-name=VP8,clock-rate=%d",
 			ts.PayloadType, ts.ClockRate,
 		))); err != nil {
-			return nil, errors.ErrGstPipelineError(err)
+			return nil, nil, errors.ErrGstPipelineError(err)
 		}
 
 		rtpVP8Depay, err := gst.NewElement("rtpvp8depay")
 		if err != nil {
-			return nil, errors.ErrGstPipelineError(err)
+			return nil, nil, errors.ErrGstPipelineError(err)
 		}
 		if err = appSrcBin.AddElement(rtpVP8Depay); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
+		probeElement = rtpVP8Depay
 
-		if err := b.attachKeyframeProbe(ts, name, rtpVP8Depay); err != nil {
-			return nil, err
-		}
-
-		if !b.conf.VideoDecoding {
-			return appSrcBin, nil
-		}
-		vp8Dec, err := gst.NewElement("vp8dec")
-		if err != nil {
-			return nil, errors.ErrGstPipelineError(err)
-		}
-		if err = appSrcBin.AddElement(vp8Dec); err != nil {
-			return nil, err
+		if decode {
+			vp8Dec, err := gst.NewElement("vp8dec")
+			if err != nil {
+				return nil, nil, errors.ErrGstPipelineError(err)
+			}
+			if err = appSrcBin.AddElement(vp8Dec); err != nil {
+				return nil, nil, err
+			}
 		}
 
 	case types.MimeTypeVP9:
@@ -670,52 +687,47 @@ func (b *VideoBin) buildAppSrcBin(ts *config.TrackSource, name string) (*gstream
 			"application/x-rtp,media=video,payload=%d,encoding-name=VP9,clock-rate=%d",
 			ts.PayloadType, ts.ClockRate,
 		))); err != nil {
-			return nil, errors.ErrGstPipelineError(err)
+			return nil, nil, errors.ErrGstPipelineError(err)
 		}
 
 		rtpVP9Depay, err := gst.NewElement("rtpvp9depay")
 		if err != nil {
-			return nil, errors.ErrGstPipelineError(err)
+			return nil, nil, errors.ErrGstPipelineError(err)
 		}
 		if err = appSrcBin.AddElement(rtpVP9Depay); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 
 		vp9Parse, err := gst.NewElement("vp9parse")
 		if err != nil {
-			return nil, errors.ErrGstPipelineError(err)
+			return nil, nil, errors.ErrGstPipelineError(err)
 		}
 		if err = appSrcBin.AddElement(vp9Parse); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
+		probeElement = vp9Parse
 
-		if err := b.attachKeyframeProbe(ts, name, vp9Parse); err != nil {
-			return nil, err
-		}
-
-		if !b.conf.VideoDecoding {
+		if decode {
+			vp9Dec, err := gst.NewElement("vp9dec")
+			if err != nil {
+				return nil, nil, errors.ErrGstPipelineError(err)
+			}
+			if err = appSrcBin.AddElement(vp9Dec); err != nil {
+				return nil, nil, err
+			}
+		} else {
 			vp9Caps, err := gst.NewElement("capsfilter")
 			if err != nil {
-				return nil, errors.ErrGstPipelineError(err)
+				return nil, nil, errors.ErrGstPipelineError(err)
 			}
 			if err = vp9Caps.SetProperty("caps", gst.NewCapsFromString(
 				"video/x-vp9,width=[16,2147483647],height=[16,2147483647]",
 			)); err != nil {
-				return nil, errors.ErrGstPipelineError(err)
+				return nil, nil, errors.ErrGstPipelineError(err)
 			}
-
 			if err = appSrcBin.AddElement(vp9Caps); err != nil {
-				return nil, err
+				return nil, nil, err
 			}
-			return appSrcBin, nil
-		}
-
-		vp9Dec, err := gst.NewElement("vp9dec")
-		if err != nil {
-			return nil, errors.ErrGstPipelineError(err)
-		}
-		if err = appSrcBin.AddElement(vp9Dec); err != nil {
-			return nil, err
 		}
 
 	case types.MimeTypeAV1:
@@ -723,74 +735,72 @@ func (b *VideoBin) buildAppSrcBin(ts *config.TrackSource, name string) (*gstream
 			"application/x-rtp,media=video,payload=%d,encoding-name=AV1,clock-rate=%d",
 			ts.PayloadType, ts.ClockRate,
 		))); err != nil {
-			return nil, errors.ErrGstPipelineError(err)
+			return nil, nil, errors.ErrGstPipelineError(err)
 		}
 
 		rtpAV1Depay, err := gst.NewElement("rtpav1depay")
 		if err != nil {
-			return nil, errors.ErrGstPipelineError(err)
+			return nil, nil, errors.ErrGstPipelineError(err)
 		}
 
 		// rtpav1depay emits OBU-aligned buffers; av1parse regroups them into
 		// temporal units, the alignment av1dec and the muxers accept.
 		av1Parse, err := gst.NewElement("av1parse")
 		if err != nil {
-			return nil, errors.ErrGstPipelineError(err)
+			return nil, nil, errors.ErrGstPipelineError(err)
 		}
 
 		av1Caps, err := gst.NewElement("capsfilter")
 		if err != nil {
-			return nil, errors.ErrGstPipelineError(err)
+			return nil, nil, errors.ErrGstPipelineError(err)
 		}
 		if err = av1Caps.SetProperty("caps", gst.NewCapsFromString(
 			"video/x-av1,stream-format=obu-stream,alignment=tu",
 		)); err != nil {
-			return nil, errors.ErrGstPipelineError(err)
+			return nil, nil, errors.ErrGstPipelineError(err)
 		}
 
 		if err = appSrcBin.AddElements(rtpAV1Depay, av1Parse, av1Caps); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
+		probeElement = av1Parse
 
-		if err := b.attachKeyframeProbe(ts, name, av1Parse); err != nil {
-			return nil, err
-		}
-
-		if !b.conf.VideoDecoding {
-			return appSrcBin, nil
-		}
-
-		// dav1d decodes several times faster than libaom; images without the plugin use av1dec.
-		av1Decoder := "dav1ddec"
-		if gst.Find(av1Decoder) == nil {
-			av1Decoder = "av1dec"
-			logger.Warnw("dav1ddec not available, decoding AV1 with libaom av1dec", nil, "trackID", ts.TrackID)
-		}
-		av1Dec, err := gst.NewElement(av1Decoder)
-		if err != nil {
-			return nil, errors.ErrGstPipelineError(err)
-		}
-		if av1Decoder == "dav1ddec" && b.conf.Live {
-			// A live pipeline caps dav1d at one frame in flight, so threads beyond
-			// tile parallelism add CPU without throughput; the default spawns one per
-			// logical core. Non-live pipelines keep the default for faster-than-realtime.
-			if err = av1Dec.SetProperty("n-threads", uint(2)); err != nil {
-				return nil, errors.ErrGstPipelineError(err)
+		if decode {
+			// dav1d decodes several times faster than libaom; images without the plugin use av1dec.
+			av1Decoder := "dav1ddec"
+			if gst.Find(av1Decoder) == nil {
+				av1Decoder = "av1dec"
+				logger.Warnw("dav1ddec not available, decoding AV1 with libaom av1dec", nil, "trackID", ts.TrackID)
 			}
-		}
-		if err = appSrcBin.AddElement(av1Dec); err != nil {
-			return nil, err
+			av1Dec, err := gst.NewElement(av1Decoder)
+			if err != nil {
+				return nil, nil, errors.ErrGstPipelineError(err)
+			}
+			if av1Decoder == "dav1ddec" && (conf.Live || conf.Compositing) {
+				// One frame in flight (a live pipeline resolves it, a non-live compositor input sets it
+				// so a GAP is not held behind decoded frames), so threads beyond tile parallelism add
+				// CPU without throughput; the default spawns one per logical core.
+				if err = av1Dec.SetProperty("n-threads", uint(2)); err != nil {
+					return nil, nil, errors.ErrGstPipelineError(err)
+				}
+				if !conf.Live {
+					av1Dec.SetArg("max-frame-delay", "1")
+				}
+			}
+			if err = appSrcBin.AddElement(av1Dec); err != nil {
+				return nil, nil, err
+			}
 		}
 
 	default:
-		return nil, errors.ErrNotSupported(string(ts.MimeType))
+		return nil, nil, errors.ErrNotSupported(string(ts.MimeType))
 	}
 
-	if err := b.addVideoConverter(appSrcBin, name, ts.PublicationSource == livekit.TrackSource_SCREEN_SHARE); err != nil {
-		return nil, err
+	probe, err := newKeyframeProbe(ts.TrackID, ts.MimeType, probeElement, ts.OnKeyframeRequired, ts.OnKeyframeReceived)
+	if err != nil {
+		return nil, nil, err
 	}
-
-	return appSrcBin, nil
+	return appSrcBin, probe, nil
 }
 
 func (b *VideoBin) setCellTargetLocked(name string) error {
@@ -1296,7 +1306,63 @@ func (b *VideoBin) addCompositorInput(bin *gstreamer.Bin, videoQueue *gst.Elemen
 	// the crop's sink pad is the last place the frame is still at source resolution
 	b.watchSrcDimensions(crop.GetStaticPad("sink"), name)
 
+	if !b.conf.Live {
+		installVideoGapFill(videoRate.GetStaticPad("sink"))
+	}
+
 	return bin.AddElements(videoQueue, crop, videoScale, videoConvert, videoRate, caps)
+}
+
+// installVideoGapFill turns GAP events at videorate's sink pad into empty gap buffers at the gap's start and end.
+// videorate repeats them at the output rate, so a non-live compositor keeps getting buffers it draws nothing for.
+func installVideoGapFill(sinkPad *gst.Pad) {
+	sinkPad.AddProbe(gst.PadProbeTypeEventDownstream, func(pad *gst.Pad, info *gst.PadProbeInfo) gst.PadProbeReturn {
+		event := info.GetEvent()
+		if event == nil {
+			return gst.PadProbeOK
+		}
+		switch event.Type() {
+		case gst.EventTypeSegment:
+			// videorate restarts its output timeline on every segment that differs, so one that changes nothing is dropped
+			current := pad.GetStickyEvent(gst.EventTypeSegment, 0)
+			if current != nil && sameSegment(current.ParseSegment(), event.ParseSegment()) {
+				return gst.PadProbeDrop
+			}
+			return gst.PadProbeOK
+		case gst.EventTypeGap:
+		default:
+			return gst.PadProbeOK
+		}
+		if pad.GetCurrentCaps() == nil {
+			return gst.PadProbeOK
+		}
+		// a track's first GAP precedes any segment: the RTP depayloader sends its own with its first packet
+		if pad.GetStickyEvent(gst.EventTypeSegment, 0) == nil {
+			segment := gst.NewFormattedSegment(gst.FormatTime)
+			sent := pad.SendEvent(gst.NewSegmentEvent(segment))
+			segment.Free()
+			if !sent {
+				logger.Warnw("could not send videorate a segment for a video gap", nil)
+				return gst.PadProbeOK
+			}
+		}
+		start, duration := event.ParseGap()
+		marks := []time.Duration{start}
+		if duration > 0 {
+			marks = append(marks, start+duration)
+		}
+		for _, pts := range marks {
+			buf := gst.NewEmptyBuffer()
+			buf.SetPresentationTimestamp(gst.ClockTime(pts))
+			buf.SetFlags(gst.BufferFlagGap | gst.BufferFlagDroppable)
+			// recursive stream lock: the marks enter videorate in order
+			if flow := pad.Chain(buf); flow != gst.FlowOK {
+				logger.Debugw("could not fill video gap", "flow", flow, "filled", pts)
+				break
+			}
+		}
+		return gst.PadProbeDrop
+	})
 }
 
 func (b *VideoBin) newVideoCapsFilter(includeFramerate bool) (*gst.Element, error) {
