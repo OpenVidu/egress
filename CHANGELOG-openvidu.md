@@ -5,10 +5,15 @@ The changes of the upstream project are listed in its GitHub releases.
 
 ## [Unreleased]
 
+### Changed
+
+- The image builds the Room Composite templates from this repository's `template-default` instead of taking upstream's
+  `livekit/egress-templates` image, so OpenVidu's changes to the default template ship with it.
+
 ### Improved
 
 - The default template asks for each camera at the size it draws it, so recording no longer makes every participant publish their 720p layer.
-  Not in 3.10.0: the image still takes its templates from upstream's `livekit/egress-templates`, so it only ships once the image is built with this repository's templates.
+  It was in the 3.10.0 sources, but not in its image, which still took upstream's templates.
 
 ## 3.10.0
 

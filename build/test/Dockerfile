@@ -24,7 +24,37 @@ ARG LINT_VERSION=v2.14.0
 # --build-arg GSTVERSION=$(cat .gst-version).
 ARG GSTVERSION
 
-FROM livekit/egress-templates:$TEMPLATE_TAG AS template
+# BEGIN OPENVIDU BLOCK
+# Build this repository's template-default (same steps as build/template/Dockerfile): upstream's
+# livekit/egress-templates image lacks OpenVidu's changes. It is JavaScript, so built once natively.
+# FROM livekit/egress-templates:$TEMPLATE_TAG AS template
+FROM --platform=$BUILDPLATFORM ubuntu:24.04 AS template
+
+WORKDIR /workspace
+
+RUN apt update
+RUN apt install -y curl
+
+COPY .node-version /tmp/.node-version
+RUN NODE_VERSION=$(cat /tmp/.node-version) && \
+    case "$(dpkg --print-architecture)" in \
+      amd64) NODE_ARCH=x64 ;; \
+      arm64) NODE_ARCH=arm64 ;; \
+      *) echo "unsupported architecture" >&2; exit 1 ;; \
+    esac && \
+    NODE_TAR=node-v${NODE_VERSION}-linux-${NODE_ARCH}.tar.gz && \
+    cd /tmp && \
+    curl -fsSLO https://nodejs.org/dist/v${NODE_VERSION}/${NODE_TAR} && \
+    curl -fsSL https://nodejs.org/dist/v${NODE_VERSION}/SHASUMS256.txt | grep " ${NODE_TAR}\$" | sha256sum -c - && \
+    tar -xzf ${NODE_TAR} -C /usr/local --strip-components=1 --no-same-owner && \
+    rm ${NODE_TAR} /tmp/.node-version
+RUN npm install -g pnpm@12
+
+COPY template-default/ .
+
+RUN pnpm install
+RUN pnpm build
+# END OPENVIDU BLOCK
 
 FROM livekit/gstreamer:$GSTVERSION-dev AS builder
 
