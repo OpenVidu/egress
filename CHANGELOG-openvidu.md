@@ -3,16 +3,19 @@
 Notable changes of the OpenVidu fork of `egress`, which is versioned in lockstep with OpenVidu.
 The changes of the upstream project are listed in its GitHub releases.
 
+## [Unreleased]
+
+### Improved
+
+- The default template asks for each camera at the size it draws it, so recording no longer makes every participant publish their 720p layer.
+  Not in 3.10.0: the image still takes its templates from upstream's `livekit/egress-templates`, so it only ships once the image is built with this repository's templates.
+
 ## 3.10.0
 
 ### Added
 
 - A stream url can carry a tag, `#ov-stream-tag=<tag>`, which the egress reports after the redacted url
   of the stream and never sends to the RTMP server.
-
-### Improved
-
-- The default template asks for each camera at the size it draws it, so recording no longer makes every participant publish their 720p layer.
 
 ### Fixed
 
